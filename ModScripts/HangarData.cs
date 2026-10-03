@@ -150,24 +150,15 @@ namespace CustomHangar
                     if (fData.factionHangarData.gridData.Count == 0)
                         return names;
 
+                    var sb = new StringBuilder();
                     for (int i = 0; i < fData.factionHangarData.gridData.Count; i++)
                     {
-                        names += "\n";
-                        if (isLeader)
-                            names += $"[{i}] {fData.factionHangarData.gridData[i].gridName}";
-                        else
-                        {
-                            if (fData.factionHangarData.gridData[i].owner == playerId)
-                                names += $"[{i}] {fData.factionHangarData.gridData[i].gridName}";
-                        }
-
-                        if (fData.factionHangarData.gridData[i].autoHangared)
-                            names += " [AutoHangar]";
-
-                        if (fData.factionHangarData.gridData[i].fileMissing)
-                            names += " [Missing]";
+                        // Members only see (and can only use) their own grids
+                        if (!isLeader && fData.factionHangarData.gridData[i].owner != playerId) continue;
+                        AppendGridLine(sb, i, fData.factionHangarData.gridData[i]);
                     }
 
+                    names = sb.ToString();
                     names += $"\nFaction Hangar Totals: {GetFactionSlots(factionId)}/{Session.Instance.config.factionHangarConfig.maxFactionSlots}";
                 }
                     
@@ -223,24 +214,23 @@ namespace CustomHangar
                     if (pData.privateHangarData.gridData.Count == 0)
                         return names;
 
+                    var sb = new StringBuilder();
                     for (int i = 0; i < pData.privateHangarData.gridData.Count; i++)
-                    {
-                        names += "\n";
-                        if (pData.privateHangarData.gridData[i].owner == playerId)
-                            names += $"[{i}] {pData.privateHangarData.gridData[i].gridName}";
+                        AppendGridLine(sb, i, pData.privateHangarData.gridData[i]);
 
-                        if (pData.privateHangarData.gridData[i].autoHangared)
-                            names += " [AutoHangar]";
-
-                        if (pData.privateHangarData.gridData[i].fileMissing)
-                            names += " [Missing]";
-                    }
-
+                    names = sb.ToString();
                     names += $"\nPrivate Hangar Totals: {GetPrivateSlots(playerId)}/{Session.Instance.config.privateHangarConfig.maxPrivateSlots}";
                 }
             }
 
             return names;
+        }
+
+        static void AppendGridLine(StringBuilder sb, int index, GridData data)
+        {
+            sb.Append('\n').Append('[').Append(index).Append("] ").Append(data.gridName);
+            if (data.autoHangared) sb.Append(" [AutoHangar]");
+            if (data.fileMissing) sb.Append(" [Missing]");
         }
 
         public PrivateData GetPrivateData(long playerId)
@@ -290,7 +280,11 @@ namespace CustomHangar
             }
 
             GridData gridData = GetFactionGridData(factionId, index);
-            if (gridData == null) return false;
+            if (gridData == null)
+            {
+                MyVisualScriptLogicProvider.SendChatMessageColored($"Grid index {index} is invalid", Color.Red, "[FactionHangar]", playerId, "Red");
+                return false;
+            }
 
             if (gridData.owner != playerId)
             {
@@ -306,6 +300,7 @@ namespace CustomHangar
 
             RemoveFactionData(factionId, index);
             AddPrivateData(gridData.gridName, gridData.gridId, playerId, gridData.gridPath, gridData.ownerName, gridData.autoHangared);
+            MyVisualScriptLogicProvider.SendChatMessageColored($"Moved {gridData.gridName} to your private hangar.", Color.Green, "[FactionHangar]", playerId, "Green");
             return true;
         }
 
@@ -318,7 +313,11 @@ namespace CustomHangar
             }
 
             GridData gridData = GetPrivateGridData(playerId, index);
-            if (gridData == null) return false;
+            if (gridData == null)
+            {
+                MyVisualScriptLogicProvider.SendChatMessageColored($"Grid index {index} is invalid", Color.Red, "[FactionHangar]", playerId, "Red");
+                return false;
+            }
 
             if (GetFactionSlots(factionId) >= Session.Instance.config.factionHangarConfig.maxFactionSlots)
             {
@@ -328,6 +327,7 @@ namespace CustomHangar
 
             RemovePrivateData(playerId, index);
             AddFactionData(factionId, gridData.gridName, gridData.gridId, playerId, gridData.gridPath, gridData.ownerName, gridData.autoHangared);
+            MyVisualScriptLogicProvider.SendChatMessageColored($"Moved {gridData.gridName} to the faction hangar.", Color.Green, "[FactionHangar]", playerId, "Green");
             return true;
         }
 

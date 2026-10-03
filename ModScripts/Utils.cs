@@ -41,6 +41,7 @@ namespace CustomHangar
                 isLeader = faction.IsLeader(playerId);
 
             Session.Instance.gridListToStore.Clear();
+            Session.Instance.gridListType = hangarType;
             int index = 0;
             string gridNames = "Choose grid by index, \nPotential Grids To Store:\n";
 
@@ -285,6 +286,22 @@ namespace CustomHangar
             return true;
         }
 
+        /// <summary>Grids already waiting out their store delay for this hangar, so they count against its slots.</summary>
+        static int QueuedSlots(HangarType hangarType, IMyFaction faction, long requesterId)
+        {
+            int count = 0;
+            foreach (var delay in Session.Instance.hangarDelay)
+            {
+                if (delay.hangarType != hangarType) continue;
+                if (hangarType == HangarType.Private ? delay.requesterId != requesterId
+                    : MyAPIGateway.Session.Factions.TryGetPlayerFaction(delay.requesterId) != faction) continue;
+
+                count += delay.gridData.Count;
+            }
+
+            return count;
+        }
+
         static bool IsQueuedForStorage(long gridId)
         {
             foreach (var delay in Session.Instance.hangarDelay)
@@ -326,7 +343,7 @@ namespace CustomHangar
                     return;
                 }
 
-                slots = session.allHangarData.GetFactionSlots(faction.FactionId);
+                slots = session.allHangarData.GetFactionSlots(faction.FactionId) + QueuedSlots(hangarType, faction, requesterId);
                 maxSlots = config.factionHangarConfig.maxFactionSlots;
                 if (slots >= maxSlots)
                 {
@@ -343,7 +360,7 @@ namespace CustomHangar
                     return;
                 }
 
-                slots = session.allHangarData.GetPrivateSlots(requesterId);
+                slots = session.allHangarData.GetPrivateSlots(requesterId) + QueuedSlots(hangarType, null, requesterId);
                 maxSlots = config.privateHangarConfig.maxPrivateSlots;
                 if (slots >= maxSlots)
                 {
@@ -457,6 +474,8 @@ namespace CustomHangar
                 MyVisualScriptLogicProvider.SendChatMessageColored($"{gridNames}", Color.Green, "[FactionHangar]", packet.playerId, "Green");
                 return;
             }
+
+            Reject(packet.playerId, "Need to be in a faction to use the faction hangar.");
         }
 
         public static void GetPrivateList(ObjectContainer packet)
@@ -901,8 +920,9 @@ namespace CustomHangar
 
         public static void RemovePlayersFromSeats(MyCubeGrid grid)
         {
+            // Damaged seats too: a pilot left inside is deleted along with the grid
             List<IMyCockpit> Blocks = new List<IMyCockpit>();
-            MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid).GetBlocksOfType(Blocks, x => x.IsFunctional);
+            MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid).GetBlocksOfType(Blocks);
 
             foreach(var block in Blocks)
             {

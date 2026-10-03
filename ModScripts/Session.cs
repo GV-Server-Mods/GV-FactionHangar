@@ -87,6 +87,7 @@ namespace CustomHangar
         private bool drawClientSphereDebug = true;
         public bool spawnClientGPS = true;
         public List<IMyCubeGrid> gridListToStore = new List<IMyCubeGrid>();
+        public HangarType gridListType = HangarType.Faction;
         public bool inGridPlacementView;
         public bool spawnCostBypass;
         public long spawnGridId;
@@ -164,16 +165,15 @@ namespace CustomHangar
                 MyVisualScriptLogicProvider.ToolEquipped += ToolEquipped;
         }
 
+        /// <summary>
+        /// Server, once at startup: identities with their last logout time, for auto-hangar and names.
+        /// Builds a world checkpoint, so it is not run on every save; GetPlayerName covers newer players.
+        /// </summary>
         public void UpdateIdentities()
         {
             var save = MyAPIGateway.Session.GetCheckpoint(MyAPIGateway.Session.Name);
-            if (save == null) return;
-
-            allIdentities = save.Identities;
-            if (allIdentities == null)
-                return;
-
-            Comms.SendIdentitiesToClients(allIdentities);
+            if (save?.Identities != null)
+                allIdentities = save.Identities;
         }
 
         private void CheckLastLogOff()
@@ -205,8 +205,6 @@ namespace CustomHangar
                     if (!factionsToHangar.ContainsKey(faction))
                         factionsToHangar.Add(faction, true);
                 }
-
-                MyLog.Default.WriteLineAndConsole($"[FactionHangar] Player = {identity.DisplayName} Last Login: {DateTime.Now - identity.LastLogoutTime} / Config: {TimeSpan.FromDays(config.autoHangarConfig.daysFactionLogin)}");
 
                 if (DateTime.Now - identity.LastLogoutTime >= TimeSpan.FromDays(config.autoHangarConfig.daysFactionLogin))
                 {
@@ -245,183 +243,108 @@ namespace CustomHangar
             {
                 HashSet<IMyEntity> ents = new HashSet<IMyEntity>();
                 List<IMyCubeGrid> physicalGroup = new List<IMyCubeGrid>();
-                List<IMyCubeGrid> processedGrids = new List<IMyCubeGrid>();
+                HashSet<long> processedGrids = new HashSet<long>();
                 MyAPIGateway.Entities.GetEntities(ents);
 
                 factionGrids.Clear();
                 playerGrids.Clear();
 
-                foreach(var ent in ents)
+                // Queue every grid once, under the owner of the first grid seen in its physical group
+                foreach (var ent in ents)
                 {
                     IMyCubeGrid grid = ent as IMyCubeGrid;
-                    if (grid == null) continue;
+                    if (grid == null || !processedGrids.Add(grid.EntityId)) continue;
 
-                    if (processedGrids.Contains(grid)) continue;
-                    long owner = grid.BigOwners.FirstOrDefault();
+                    long owner = grid.BigOwners.Count > 0 ? grid.BigOwners[0] : 0;
                     IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(owner);
-                    GetGroupByType(grid, physicalGroup, GridLinkTypeEnum.Physical);
+                    ConcurrentQueue<IMyCubeGrid> queue;
                     if (faction != null)
                     {
-                        if (factionGrids.ContainsKey(faction))
+                        if (!factionGrids.TryGetValue(faction, out queue))
                         {
-                            if (factionGrids[faction].Contains(grid)) continue;
-
-                            factionGrids[faction].Enqueue(grid);
-                            processedGrids.Add(grid);
-                            foreach(var connectedGrid in physicalGroup)
-                            {
-                                if (grid == connectedGrid) continue;
-                                factionGrids[faction].Enqueue(grid);
-                                processedGrids.Add(grid);
-                            }
+                            queue = new ConcurrentQueue<IMyCubeGrid>();
+                            factionGrids.TryAdd(faction, queue);
                         }
-                        else
-                        {
-                            ConcurrentQueue<IMyCubeGrid> temp = new ConcurrentQueue<IMyCubeGrid>();
-                            temp.Enqueue(grid);
-                            processedGrids.Add(grid);
-                            foreach (var connectedGrid in physicalGroup)
-                            {
-                                if (grid == connectedGrid) continue;
-                                temp.Enqueue(grid);
-                                processedGrids.Add(grid);
-                            }
-                            factionGrids.TryAdd(faction, temp);
-                        }
-                            
                     }
-                    else
+                    else if (!playerGrids.TryGetValue(owner, out queue))
                     {
-                        if (playerGrids.ContainsKey(owner))
-                        {
-                            playerGrids[owner].Enqueue(grid);
-                            processedGrids.Add(grid);
-                            foreach (var connectedGrid in physicalGroup)
-                            {
-                                if (grid == connectedGrid) continue;
-                                playerGrids[owner].Enqueue(grid);
-                                processedGrids.Add(grid);
-                            }
-                        } 
-                        else
-                        {
-                            ConcurrentQueue<IMyCubeGrid> temp = new ConcurrentQueue<IMyCubeGrid>();
-                            temp.Enqueue(grid);
-                            processedGrids.Add(grid);
-                            foreach (var connectedGrid in physicalGroup)
-                            {
-                                if (grid == connectedGrid) continue;
-                                temp.Enqueue(grid);
-                                processedGrids.Add(grid);
-                            }
-                            playerGrids.TryAdd(owner, temp);
-                        }
-                           
+                        queue = new ConcurrentQueue<IMyCubeGrid>();
+                        playerGrids.TryAdd(owner, queue);
                     }
+
+                    queue.Enqueue(grid);
+                    GetGroupByType(grid, physicalGroup, GridLinkTypeEnum.Physical);
+                    foreach (var connectedGrid in physicalGroup)
+                        if (processedGrids.Add(connectedGrid.EntityId))
+                            queue.Enqueue(connectedGrid);
                 }
             }
 
-            if (expiredFactions.Count > 0)
-            {
-                foreach (var faction in expiredFactions)
-                    AutoHangar(faction, 0);
+            foreach (var faction in expiredFactions)
+                AutoHangar(faction, 0);
 
-            }
-
-            if (expiredPlayers.Count > 0)
-            {
-                foreach (var playerId in expiredPlayers)
-                    AutoHangar(null, playerId);
-            }
-            
+            foreach (var playerId in expiredPlayers)
+                AutoHangar(null, playerId);
         }
 
         private void AutoHangar(IMyFaction faction, long playerId)
         {
+            ConcurrentQueue<IMyCubeGrid> grids;
             if (faction != null)
-            {
-                ConcurrentQueue<IMyCubeGrid> grids = new ConcurrentQueue<IMyCubeGrid>();
-                IMyCubeGrid grid = null;
                 factionGrids.TryGetValue(faction, out grids);
-                List<IMyCubeGrid> foundGridsList = new List<IMyCubeGrid>();
-
-                if (grids == null)
-                    return;
-
-                while (grids.Count > 0)
-                {
-                    grid = null;
-                    if (grids.TryDequeue(out grid))
-                    {
-                        if (grid == null) continue;
-
-                        if (foundGridsList.Contains(grid)) continue;
-
-                        List<IMyCubeGrid> connectedGrids = new List<IMyCubeGrid>();
-                        GetGroupByType(grid, connectedGrids, GridLinkTypeEnum.Physical);
-                        MyCubeGrid cubeGrid = grid as MyCubeGrid;
-                        MyCubeGrid biggestGrid = cubeGrid.GetBiggestGridInGroup();
-                        if (biggestGrid == null)
-                            return;
-
-                        bool excludeGrid = false;
-                        foundGridsList.Add(grid);
-                        if (Utils.CheckForExcludedBlock(grid as MyCubeGrid))
-                            excludeGrid = true;
-
-                        foreach (var connectedGrid in connectedGrids)
-                        {
-                            if (connectedGrid == grid) continue;
-                            foundGridsList.Add(connectedGrid);
-                            if (!excludeGrid)
-                                if (Utils.CheckForExcludedBlock(connectedGrid as MyCubeGrid))
-                                    excludeGrid = true;
-                        }
-                        if (excludeGrid) continue;
-
-                        long owner = biggestGrid.BigOwners.FirstOrDefault();
-                        string playerName = GetPlayerName(owner);
-                        RequestingGridStorage(owner, owner, biggestGrid.EntityId, playerName, false, true);
-                    }
-                }
-            }
-
-            if (playerId != 0)
-            {
-                ConcurrentQueue<IMyCubeGrid> grids = new ConcurrentQueue<IMyCubeGrid>();
-                IMyCubeGrid grid = null;
+            else
                 playerGrids.TryGetValue(playerId, out grids);
-                List<IMyCubeGrid> foundGridsList = new List<IMyCubeGrid>();
 
-                if (grids == null)
-                    return;
+            if (grids == null) return;
 
-                while (grids.Count > 0)
+            HashSet<long> handled = new HashSet<long>();
+            List<IMyCubeGrid> connectedGrids = new List<IMyCubeGrid>();
+            IMyCubeGrid grid;
+            while (grids.TryDequeue(out grid))
+            {
+                if (grid == null || grid.MarkedForClose || !handled.Add(grid.EntityId)) continue;
+
+                GetGroupByType(grid, connectedGrids, GridLinkTypeEnum.Physical);
+                bool skip = false;
+                foreach (var connectedGrid in connectedGrids)
                 {
-                    grid = null;
-                    if (grids.TryDequeue(out grid))
+                    handled.Add(connectedGrid.EntityId);
+                    if (skip) continue;
+
+                    // Never hangar a group that includes someone else's grid (e.g. landing-geared to an active base)
+                    if (!IsOwnedBy(connectedGrid, faction, playerId))
                     {
-                        if (grid == null) continue;
-                        if (foundGridsList.Contains(grid)) continue;
-
-                        List<IMyCubeGrid> connectedGrids = new List<IMyCubeGrid>();
-                        GetGroupByType(grid, connectedGrids, GridLinkTypeEnum.Physical);
-                        MyCubeGrid cubeGrid = grid as MyCubeGrid;
-                        MyCubeGrid biggestGrid = cubeGrid.GetBiggestGridInGroup();
-
-                        foundGridsList.Add(grid);
-                        foreach (var connectedGrid in connectedGrids)
-                        {
-                            if (connectedGrid == grid) continue;
-                            foundGridsList.Add(connectedGrid);
-                        }
-
-                        long owner = biggestGrid.BigOwners.FirstOrDefault();
-                        string playerName = GetPlayerName(owner);
-                        RequestingGridStorage(owner, owner, biggestGrid.EntityId, playerName, true, true);
+                        MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar skipped grid {grid.CustomName}: connected to {connectedGrid.CustomName}, which another player owns");
+                        skip = true;
+                        continue;
                     }
+
+                    if (faction != null && Utils.CheckForExcludedBlock(connectedGrid as MyCubeGrid))
+                        skip = true;
                 }
+
+                if (skip) continue;
+
+                MyCubeGrid biggestGrid = (grid as MyCubeGrid)?.GetBiggestGridInGroup();
+                if (biggestGrid == null) continue;
+
+                long owner = biggestGrid.BigOwners.Count > 0 ? biggestGrid.BigOwners[0] : 0;
+                if (owner == 0) continue;
+
+                string playerName = GetPlayerName(owner);
+                RequestingGridStorage(owner, owner, biggestGrid.EntityId, playerName, faction == null, true);
             }
+        }
+
+        /// <summary>True if the grid is unowned or owned by the expired faction (or expired player).</summary>
+        static bool IsOwnedBy(IMyCubeGrid grid, IMyFaction faction, long playerId)
+        {
+            long owner = grid.BigOwners.Count > 0 ? grid.BigOwners[0] : 0;
+            if (owner == 0) return true;
+            if (faction == null) return owner == playerId;
+
+            IMyFaction ownerFaction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(owner);
+            return ownerFaction != null && ownerFaction.FactionId == faction.FactionId;
         }
 
         public new void HandleInput()
@@ -759,7 +682,9 @@ namespace CustomHangar
             {
                 if (config == null)
                 {
-                    Comms.ClientRequestConfig(playerCache.SteamUserId);
+                    // Ask every 5 s until it arrives, not every tick
+                    if (ticks % 300 == 0)
+                        Comms.ClientRequestConfig(playerCache.SteamUserId);
                     return;
                 }
 
@@ -1255,7 +1180,8 @@ namespace CustomHangar
                     if (!int.TryParse(split[2], out gridIndex)) gridIndex = -1;
 
                     //GetEntitiesInSphere(entities, playerCache.GetPosition(), 500);
-                    if (gridIndex < 0 || gridIndex >= gridListToStore.Count)
+                    // The index must come from a faction list, not one shown by /ph store
+                    if (gridIndex < 0 || gridIndex >= gridListToStore.Count || gridListType != HangarType.Faction)
                     {
                         string list = "Not a valid index...\n";
                         GetEntitiesInSphere(entities, playerCache.GetPosition(), 500);
@@ -1534,7 +1460,7 @@ namespace CustomHangar
                 {
                     if (!int.TryParse(split[2], out gridIndex)) gridIndex = -1;
 
-                    if (gridIndex < 0 || gridIndex >= gridListToStore.Count)
+                    if (gridIndex < 0 || gridIndex >= gridListToStore.Count || gridListType != HangarType.Private)
                     {
                         string list = "Not a valid index...\n";
                         GetEntitiesInSphere(entities, playerCache.GetPosition(), 500);
@@ -1550,7 +1476,7 @@ namespace CustomHangar
                     {
                         Comms.SendChatMessage($"{gridName} is NOT a valid grid.", "Red", client.IdentityId, Color.Red);
                         GetEntitiesInSphere(entities, playerCache.GetPosition(), 500);
-                        string list = Utils.GetGridsToStore(entities, HangarType.Faction, client.IdentityId);
+                        string list = Utils.GetGridsToStore(entities, HangarType.Private, client.IdentityId);
                         Comms.SendChatMessage($"{list}", "Red", client.IdentityId, Color.Red);
 
                         return;
@@ -2156,7 +2082,8 @@ namespace CustomHangar
                     return identity.DisplayName;
             }
 
-            return string.Empty;
+            // Players who joined after the startup identity snapshot
+            return MyVisualScriptLogicProvider.GetPlayersName(playerId) ?? string.Empty;
         }
 
         private void OnBlockAdded(IMyEntity entity)
@@ -2245,9 +2172,9 @@ namespace CustomHangar
 
         public override void SaveData()
         {
+            if (!isServer) return;
             try
             {
-                UpdateIdentities();
                 using (var writer = MyAPIGateway.Utilities.WriteFileInWorldStorage("FactionHangarStorage.xml", typeof(AllHangarData)))
                 {
                     writer.Write(MyAPIGateway.Utilities.SerializeToXML(allHangarData));

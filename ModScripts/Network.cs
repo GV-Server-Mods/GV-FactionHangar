@@ -456,21 +456,6 @@ namespace CustomHangar
             MyAPIGateway.Multiplayer.SendMessageTo(handler, sendData, steamId);
         }
 
-        public static void SendIdentitiesToClients(List<MyObjectBuilder_Identity> list)
-        {
-            if (list == null)
-                return;
-
-            ObjectContainer oc = new ObjectContainer()
-            {
-                identityObs = new List<MyObjectBuilder_Identity>(list)
-            };
-
-            CommsPackage package = new CommsPackage(DataType.UpdateIdentities, oc);
-            var sendData = MyAPIGateway.Utilities.SerializeToBinary(package);
-            MyAPIGateway.Multiplayer.SendMessageToOthers(handler, sendData);
-        }
-
         public static void RequestGridRemoval(int index, long playerId, HangarType hangarType)
         {
             ObjectContainer oc = new ObjectContainer()
