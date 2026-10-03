@@ -163,6 +163,9 @@ namespace CustomHangar
 
                         if (fData.factionHangarData.gridData[i].autoHangared)
                             names += " [AutoHangar]";
+
+                        if (fData.factionHangarData.gridData[i].fileMissing)
+                            names += " [Missing]";
                     }
 
                     names += $"\nFaction Hangar Totals: {GetFactionSlots(factionId)}/{Session.Instance.config.factionHangarConfig.maxFactionSlots}";
@@ -228,6 +231,9 @@ namespace CustomHangar
 
                         if (pData.privateHangarData.gridData[i].autoHangared)
                             names += " [AutoHangar]";
+
+                        if (pData.privateHangarData.gridData[i].fileMissing)
+                            names += " [Missing]";
                     }
 
                     names += $"\nPrivate Hangar Totals: {GetPrivateSlots(playerId)}/{Session.Instance.config.privateHangarConfig.maxPrivateSlots}";
@@ -438,6 +444,8 @@ namespace CustomHangar
         [XmlElement("Owner")] [ProtoMember(4)] public long owner;
         [XmlElement("OwnerName")] [ProtoMember(5)] public string ownerName;
         [XmlElement("AutoHangared")][ProtoMember(6)] public bool autoHangared;
+        // Server only: set when a load finds the stored file missing, shown as [Missing] in the list
+        [XmlIgnore] [ProtoIgnore] public bool fileMissing;
     }
 
     public class CacheGridsForStorage

@@ -269,6 +269,13 @@ namespace CustomHangar
             catch (Exception ex)
             {
                 MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Network message error: {ex}");
+                // Never fail silently on the requesting player
+                if (Session.Instance != null && Session.Instance.isServer)
+                {
+                    long senderId = MyAPIGateway.Players.TryGetIdentityId(senderSteamId);
+                    if (senderId != 0)
+                        Utils.Reject(senderId, "Hangar request failed, please tell an admin.");
+                }
             }
         }
 

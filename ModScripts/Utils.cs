@@ -8,6 +8,7 @@ using Sandbox.Game.Weapons;
 using Sandbox.ModAPI;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -476,33 +477,45 @@ namespace CustomHangar
             if (packet.hangarType == HangarType.Faction)
             {
                 IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(packet.playerId);
-                if (faction != null)
+                if (faction == null)
                 {
-                    bool isLeader = faction.IsLeader(packet.playerId);
-                    var gridData = Session.Instance.allHangarData.GetFactionGridData(faction.FactionId, packet.intValue);
-                    if (gridData == null)
+                    Reject(packet.playerId, "Need to be in a faction to remove grids from hangar.");
+                    return false;
+                }
+
+                bool isLeader = faction.IsLeader(packet.playerId);
+                var gridData = Session.Instance.allHangarData.GetFactionGridData(faction.FactionId, packet.intValue);
+                if (gridData == null)
+                {
+                    Reject(packet.playerId, $"Grid index {packet.intValue} is invalid");
+                    return false;
+                }
+
+                if (!isLeader)
+                {
+                    if (gridData.owner != packet.playerId)
                     {
-                        MyVisualScriptLogicProvider.SendChatMessageColored($"Grid index {packet.intValue} is invalid", Color.Red, "[FactionHangar]", packet.playerId, "Red");
+                        Reject(packet.playerId, "You are not a faction leader and can ONLY remove grids owned by you.");
                         return false;
                     }
-
-                    if (!isLeader)
-                    {
-                        if (gridData.owner != packet.playerId)
-                        {
-                            MyVisualScriptLogicProvider.SendChatMessageColored($"You are not a faction leader and can ONLY remove grids owned by you.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                            return false;
-                        }
-                    }
-
-                    Session.Instance.allHangarData.RemoveFactionData(faction.FactionId, packet.intValue, true);
-                    return true;
                 }
+
+                Session.Instance.allHangarData.RemoveFactionData(faction.FactionId, packet.intValue, !gridData.fileMissing);
+                MyVisualScriptLogicProvider.SendChatMessageColored($"Removed [{packet.intValue}] {gridData.gridName} from the faction hangar.", Color.Green, "[FactionHangar]", packet.playerId, "Green");
+                return true;
             }
 
             if (packet.hangarType == HangarType.Private)
             {
-                Session.Instance.allHangarData.RemovePrivateData(packet.playerId, packet.intValue, true);
+                var gridData = Session.Instance.allHangarData.GetPrivateGridData(packet.playerId, packet.intValue);
+                if (gridData == null)
+                {
+                    Reject(packet.playerId, $"Grid index {packet.intValue} is invalid");
+                    return false;
+                }
+
+                Session.Instance.allHangarData.RemovePrivateData(packet.playerId, packet.intValue, !gridData.fileMissing);
+                MyVisualScriptLogicProvider.SendChatMessageColored($"Removed [{packet.intValue}] {gridData.gridName} from your private hangar.", Color.Green, "[FactionHangar]", packet.playerId, "Green");
                 return true;
             }
 
@@ -562,14 +575,55 @@ namespace CustomHangar
                 }
             }
 
-            MyObjectBuilderSerializer.DeserializeXML<MyObjectBuilder_Definitions>(gridData.gridPath, out blueprint);
-            if (blueprint == null)
+            blueprint = LoadStoredBlueprint(gridData.gridPath);
+            if (GetBlueprintGrids(blueprint) == null)
             {
-                Reject(playerId, "Failed to load the stored grid.");
+                gridData.fileMissing = true;
+                string prefix = hangarType == HangarType.Faction ? "/fh" : "/ph";
+                Reject(playerId, $"The stored file for grid [{index}] {gridData.gridName} is missing or damaged. Use {prefix} remove {index} to clear it.");
                 return false;
             }
 
             return true;
+        }
+
+        const string SavesFolder = "FactionHangarSaves";
+
+        /// <summary>
+        /// Stored blueprint path re-rooted on the current user-data folder, so entries survive a server
+        /// instance move (mods may only touch files under it). Null if the path has no saves folder.
+        /// </summary>
+        public static string ResolveGridPath(string storedPath)
+        {
+            if (string.IsNullOrEmpty(storedPath)) return null;
+            string path = storedPath.Replace('/', '\\');
+            int start = path.IndexOf("\\" + SavesFolder + "\\", StringComparison.OrdinalIgnoreCase);
+            if (start >= 0)
+                path = path.Substring(start + 1);
+            else if (!path.StartsWith(SavesFolder + "\\", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            return Path.Combine(MyAPIGateway.Utilities.GamePaths.UserDataPath, path);
+        }
+
+        /// <summary>Stored blueprint, or null if the file is missing, damaged or unreachable.</summary>
+        public static MyObjectBuilder_Definitions LoadStoredBlueprint(string storedPath)
+        {
+            string path = ResolveGridPath(storedPath);
+            if (path == null) return null;
+
+            MyObjectBuilder_Definitions blueprint;
+            try
+            {
+                MyObjectBuilderSerializer.DeserializeXML(path, out blueprint);
+            }
+            catch (Exception ex)
+            {
+                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Could not read stored grid {path}: {ex.Message}");
+                return null;
+            }
+
+            return blueprint;
         }
 
         public static MyObjectBuilder_CubeGrid[] GetBlueprintGrids(MyObjectBuilder_Definitions blueprint)
@@ -625,7 +679,9 @@ namespace CustomHangar
             MyObjectBuilder_Definitions myObjectBuilder_Definitions = MyObjectBuilderSerializer.CreateNewObject<MyObjectBuilder_Definitions>();
             myObjectBuilder_Definitions.ShipBlueprints = new MyObjectBuilder_ShipBlueprintDefinition[1];
             myObjectBuilder_Definitions.ShipBlueprints[0] = myObjectBuilder_ShipBlueprintDefinition;
-            MyObjectBuilderSerializer.SerializeXML(path, false, myObjectBuilder_Definitions);
+            string resolved = ResolveGridPath(path);
+            if (resolved != null)
+                MyObjectBuilderSerializer.SerializeXML(resolved, false, myObjectBuilder_Definitions);
         }
 
         /// <summary>

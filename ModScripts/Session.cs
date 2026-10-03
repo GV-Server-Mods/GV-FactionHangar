@@ -2040,7 +2040,11 @@ namespace CustomHangar
             if (cubeGridObs[0].PositionAndOrientation.HasValue)
                 baseMat = cubeGridObs[0].PositionAndOrientation.Value.GetMatrix();
 
-            if (baseMat == MatrixD.Zero) return;
+            if (baseMat == MatrixD.Zero)
+            {
+                AbortPreview(null);
+                return;
+            }
 
             if (cubeGridObs.Length > 1)
                 AssignSubgridSpawnLocation(cubeGridObs, endCoordCache, baseMat);
@@ -2056,7 +2060,11 @@ namespace CustomHangar
 
                 IMyEntity ent = MyAPIGateway.Entities.CreateFromObjectBuilder(cloneOb);
                 var cubeGrid = ent as MyCubeGrid;
-                if (cubeGrid == null) return;
+                if (cubeGrid == null)
+                {
+                    AbortPreview(tempGrids);
+                    return;
+                }
 
                 cubeGrid.Save = false;
                 cubeGrid.SyncFlag = false;
@@ -2068,6 +2076,18 @@ namespace CustomHangar
             massGatherWorkData.grids = tempGrids;
             massGatherWorkData.faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerCache.IdentityId);
             var massGatherTask = MyAPIGateway.Parallel.Start(massGatherWorkData.ScanGridMassAction, massGatherWorkData.ScanGridMassCallback, massGatherWorkData);
+        }
+
+        /// <summary>Undoes a half-built preview and tells the player, instead of leaving them with nothing.</summary>
+        private void AbortPreview(List<MyCubeGrid> builtGrids)
+        {
+            if (builtGrids != null)
+                foreach (var grid in builtGrids)
+                    grid.Close();
+
+            Utils.RemoveSpawnLocationsClientGPS();
+            RemovePreviewGrids();
+            Comms.SendChatMessage("Failed to build the grid preview. Try loading it again.", "Red", playerCache.IdentityId, Color.Red);
         }
 
         public void AssignSubgridSpawnLocation(MyObjectBuilder_CubeGrid[] cubeGridObs, Vector3D spawnLoc, MatrixD baseMat)
@@ -2216,16 +2236,28 @@ namespace CustomHangar
                     writer.Write(MyAPIGateway.Utilities.SerializeToXML(allHangarData));
                     writer.Close();
                 }
-
-                foreach(var path in cacheGridPaths)
-                    Utils.CreateNullShipBlueprint(path);
-
-                cacheGridPaths.Clear();
             }
             catch (Exception ex)
             {
                 VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Error trying to save hangar data!\n {ex.ToString()}");
+                // Keep the removed files until the entries' removal is actually saved
+                return;
             }
+
+            // Blank removed grids' files one by one, so one bad path can't block the rest
+            foreach (var path in cacheGridPaths)
+            {
+                try
+                {
+                    Utils.CreateNullShipBlueprint(path);
+                }
+                catch (Exception ex)
+                {
+                    VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Could not clear removed grid file {path}: {ex.Message}");
+                }
+            }
+
+            cacheGridPaths.Clear();
         }
     }
 
