@@ -40,10 +40,10 @@ namespace CustomHangar
             if (faction != null)
                 isLeader = faction.IsLeader(playerId);
 
-            Session.Instance.gridListToStore.Clear();
+            var list = Session.Instance.gridListToStore;
+            list.Clear();
             Session.Instance.gridListType = hangarType;
-            int index = 0;
-            string gridNames = "Choose grid by index, \nPotential Grids To Store:\n";
+            var gridNames = new StringBuilder("Choose grid by index, \nPotential Grids To Store:\n");
 
             foreach(var entity in entities)
             {
@@ -51,40 +51,17 @@ namespace CustomHangar
                 MyCubeGrid cubeGrid = entity as MyCubeGrid;
                 if (grid == null || grid.Physics == null || cubeGrid.BlocksCount < 2) continue;
 
-                if (faction != null)
-                {
-                    if (Session.Instance.DoesFactionOwnGrid(grid, faction))
-                    {
-                        if (!isLeader)
-                        {
-                            if (Session.Instance.DoesPlayerOwnGrid(grid, playerId))
-                            {
-                                gridNames += $"[{index}] {grid.CustomName},\n";
-                                Session.Instance.gridListToStore.Add(grid);
-                                index++;
-                            }
-                        }
-                        else
-                        {
-                            gridNames += $"[{index}] {grid.CustomName},\n";
-                            Session.Instance.gridListToStore.Add(grid);
-                            index++;
-                        }
-                    } 
-                }
-                else
-                {
-                    if (Session.Instance.DoesPlayerOwnGrid(grid, playerId))
-                    {
-                        gridNames += $"[{index}] {grid.CustomName},\n";
-                        Session.Instance.gridListToStore.Add(grid);
-                        index++;
-                    }
-                }
-                    
+                // Faction hangar: faction grids (members only their own); private hangar: own grids only
+                bool storable = hangarType == HangarType.Faction && faction != null
+                    ? Session.Instance.DoesFactionOwnGrid(grid, faction) && (isLeader || Session.Instance.DoesPlayerOwnGrid(grid, playerId))
+                    : Session.Instance.DoesPlayerOwnGrid(grid, playerId);
+                if (!storable) continue;
+
+                gridNames.Append('[').Append(list.Count).Append("] ").Append(grid.CustomName).Append(",\n");
+                list.Add(grid);
             }
 
-            return gridNames;
+            return gridNames.ToString();
         }
 
         public static void CheckOwnerValidFaction(IMyFaction faction, MyCubeGrid grid, long playerId)
@@ -165,28 +142,49 @@ namespace CustomHangar
             return false;
         }
 
+        static HashSet<MyDefinitionId> excludedBlockIds;
+
+        /// <summary>Statics outlive the session; clear them on unload so the next world rebuilds from its own config.</summary>
+        public static void ResetCaches()
+        {
+            excludedBlockIds = null;
+        }
+
         public static bool CheckForExcludedBlock(MyCubeGrid grid)
         {
-            var blocks = grid.GetFatBlocks();
-            foreach(var block in blocks)
+            if (grid == null) return false;
+            if (excludedBlockIds == null)
             {
-                VRage.Game.ModAPI.IMyCubeBlock cubeBlock = block as VRage.Game.ModAPI.IMyCubeBlock;
-                long owner = block.OwnerId;
-                if (owner == 0) continue;
+                excludedBlockIds = new HashSet<MyDefinitionId>();
+                ParseBlockTypes(Session.Instance.config.autoHangarConfig.exclusions.excludedBlockTypes, excludedBlockIds, false);
+            }
 
-                MyDefinitionId blockDef = cubeBlock.BlockDefinition;
-                foreach(var def in Session.Instance.config.autoHangarConfig.exclusions.excludedBlockTypes)
-                {
-                    foreach(var subtype in def.blockSubtypes.subtype)
-                    {
-                        MyDefinitionId id;
-                        MyDefinitionId.TryParse(def.blockType, subtype, out id);
-                        if (id != null && id == blockDef) return true;
-                    }
-                }
+            foreach (var block in grid.GetFatBlocks())
+            {
+                if (block.OwnerId == 0) continue;
+                if (excludedBlockIds.Contains(((VRage.Game.ModAPI.IMyCubeBlock)block).BlockDefinition)) return true;
             }
 
             return false;
+        }
+
+        /// <summary>Config block type/subtype pairs as definition IDs, parsed once instead of per block.</summary>
+        public static void ParseBlockTypes(BlockType[] types, HashSet<MyDefinitionId> ids, bool emptySubtypeMeansTypeOnly)
+        {
+            if (types == null) return;
+            foreach (var type in types)
+            {
+                if (type.blockSubtypes.subtype == null) continue;
+                foreach (var subtype in type.blockSubtypes.subtype)
+                {
+                    MyDefinitionId id;
+                    bool parsed = emptySubtypeMeansTypeOnly && string.IsNullOrEmpty(subtype)
+                        ? MyDefinitionId.TryParse(type.blockType, out id)
+                        : MyDefinitionId.TryParse(type.blockType, subtype, out id);
+                    if (parsed)
+                        ids.Add(id);
+                }
+            }
         }
 
         public static void LoadHelpPopup()
@@ -801,16 +799,21 @@ namespace CustomHangar
             bool removeUranium = Session.Instance.config.spawnConfig.removeUranium;
             bool removeIce = Session.Instance.config.spawnConfig.removeIce;
 
+            if (!removeAmmo && !removeUranium && !removeIce) return;
+
+            var invList = new List<VRage.Game.ModAPI.Ingame.MyInventoryItem>();
             foreach(var connectedGrid in connectedGrids)
             {
                 var blocks = connectedGrid.GetFatBlocks<VRage.Game.ModAPI.IMyCubeBlock>();
                 foreach(var block in blocks)
                 {
                     if (!block.HasInventory) continue;
-                    if (removeAmmo || removeUranium || removeIce)
+
+                    // Every inventory, not just the first (e.g. an assembler's output holds ammo)
+                    for (int inv = 0; inv < block.InventoryCount; inv++)
                     {
-                        var invList = new List<VRage.Game.ModAPI.Ingame.MyInventoryItem>();
-                        VRage.Game.ModAPI.IMyInventory blockInv = block.GetInventory();
+                        invList.Clear();
+                        VRage.Game.ModAPI.IMyInventory blockInv = block.GetInventory(inv);
                         blockInv.GetItems(invList);
 
                         foreach (var item in invList)
@@ -824,10 +827,7 @@ namespace CustomHangar
                                 removeItem = true;
 
                             if (!removeItem) continue;
-                            MyFixedPoint amount = item.Amount;
-                            uint itemId = item.ItemId;
-
-                            blockInv.RemoveItems(itemId, amount);
+                            blockInv.RemoveItems(item.ItemId, item.Amount);
                         }
                     }
                 }

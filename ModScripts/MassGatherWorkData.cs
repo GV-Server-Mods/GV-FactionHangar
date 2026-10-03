@@ -19,34 +19,15 @@ namespace CustomHangar
         public IMyFaction faction = null;
         public long playerWalletData = -1;
 
+        /// <summary>Worker thread: only reads the wallets (retrying while balances sync). Block changes happen in the callback.</summary>
         public void ScanGridMassAction(WorkData data)
         {
-            int attempts = 0;
             var workData = (MassGathererWorkData)data;
-
-            var blocks = new List<IMySlimBlock>();
-            foreach (var cubeGrid in workData.grids)
+            for (int attempt = 0; attempt <= 6; attempt++)
             {
-                if (cubeGrid.MarkedForClose)
-                    continue;
-
-                blocks.Clear();
-                blocks.EnsureCapacity(cubeGrid.BlocksCount);
-                ((IMyCubeGrid)cubeGrid).GetBlocks(blocks);
-                DisableAutopilots(blocks);
-            }
-
-            GatherWalletData:
-            if (!GatherWalletData(workData))
+                if (GatherWalletData(workData)) return;
                 MyAPIGateway.Parallel.Sleep(500);
-            else
-                return;
-
-            if (attempts > 5)
-                return;
-
-            attempts++;
-            goto GatherWalletData;
+            }
         }
 
         // Preview mass now comes from the server (SpawnRules.GetBlueprintMass); this only stops preview autopilots.
@@ -76,6 +57,16 @@ namespace CustomHangar
         public void ScanGridMassCallback(WorkData data)
         {
             var workData = (MassGathererWorkData)data;
+
+            // Game thread: block state is only changed here, never on the worker
+            var blocks = new List<IMySlimBlock>();
+            foreach (var grid in workData.grids)
+            {
+                if (grid.MarkedForClose) continue;
+                blocks.Clear();
+                ((IMyCubeGrid)grid).GetBlocks(blocks);
+                DisableAutopilots(blocks);
+            }
 
             foreach(var grid in workData.grids)
             {

@@ -52,7 +52,10 @@ namespace CustomHangar
 
         public AllHangarData allHangarData = new AllHangarData();
         public CacheGridsForStorage gridsToStore = new CacheGridsForStorage();
-        public List<IMyCubeBlock> enemyBlockCheckList = new List<IMyCubeBlock>();
+        public HashSet<IMyCubeBlock> enemyBlockCheckList = new HashSet<IMyCubeBlock>();
+        private readonly HashSet<MyDefinitionId> enemyCheckBlockIds = new HashSet<MyDefinitionId>();
+        private readonly HashSet<IMyCubeGrid> trackedGrids = new HashSet<IMyCubeGrid>();
+        private bool blockTracking;
         public Dictionary<IMyFaction, FactionTimers> cooldownTimers = new Dictionary<IMyFaction, FactionTimers>();
         public List<string> cacheGridPaths = new List<string>();
 
@@ -150,15 +153,7 @@ namespace CustomHangar
                 allHangarData = AllHangarData.LoadHangarData();
 
                 if (isDedicated)
-                {
-                    if (config.enemyCheckConfig.enableBlockCheck)
-                    {
-                        //MyAPIGateway.Entities.OnEntityAdd += OnBlockAdded;
-                        //MyAPIGateway.Entities.OnEntityAdd += OnBlockRemoved;
-                        MyEntities.OnEntityCreate += OnBlockAdded;
-                        MyEntities.OnEntityRemove += OnBlockRemoved;
-                    }
-                }
+                    StartBlockTracking();
             }
 
             if (!isDedicated)
@@ -429,17 +424,32 @@ namespace CustomHangar
             endCoordCache = MyAPIGateway.Session.Camera.WorldMatrix.Forward * previewDistance + startCoordsCache;
         }
 
+        private bool hudShown;
+        private bool hudAllow;
+        private long hudCost;
+        private SpawnType hudType;
+        private SpawnError hudError;
+        private HangarType hudHangar;
+
         private void UpdateHudMessage()
         {
             if (allowSpawn)
                 spawnError = SpawnError.None;
 
-            if (hudNotify != null)
-            {
-                hudNotify.Hide();
-                hudNotify.Text = $"[Valid Spawn] = {allowSpawn} | [Cost To Spawn] = {spawnCost} SC | [SpawnOption] = {spawnType} | [SpawningError] = {spawnError} | [HangarType] = {hangarType}";
-                hudNotify.Show();
-            }
+            if (hudNotify == null) return;
+
+            // Only rebuild the text when something shown on it changed
+            if (hudShown && hudAllow == allowSpawn && hudCost == spawnCost && hudType == spawnType && hudError == spawnError && hudHangar == hangarType) return;
+            hudShown = true;
+            hudAllow = allowSpawn;
+            hudCost = spawnCost;
+            hudType = spawnType;
+            hudError = spawnError;
+            hudHangar = hangarType;
+
+            hudNotify.Hide();
+            hudNotify.Text = $"[Valid Spawn] = {allowSpawn} | [Cost To Spawn] = {spawnCost} SC | [SpawnOption] = {spawnType} | [SpawningError] = {spawnError} | [HangarType] = {hangarType}";
+            hudNotify.Show();
         }
 
         /// <summary>Client preview of the server's spawn decision (SpawnRules), measured at the main preview grid's centre.</summary>
@@ -494,27 +504,41 @@ namespace CustomHangar
             return SpawnRules.IsEnemyNear(grid.GetPosition(), check, owner);
         }
 
-        private void DrawBoundingBox()
-        {
-            List<MyEntity> entities = new List<MyEntity>();
-            GetEntitiesInSphere(entities, playerCache.GetPosition(), 200);
+        static readonly MyStringId LineMaterial = MyStringId.GetOrCompute("WeaponLaser");
+        readonly List<MyEntity> nearbyEntities = new List<MyEntity>();
+        readonly List<IMyCubeGrid> nearbyGrids = new List<IMyCubeGrid>();
 
-            Color otherCol = Color.White;
-            foreach (var ent in entities)
+        /// <summary>Grids in front of the player within 200 m, refreshed 6 times a second instead of every frame.</summary>
+        private void RefreshNearbyGrids()
+        {
+            nearbyGrids.Clear();
+            GetEntitiesInSphere(nearbyEntities, playerCache.GetPosition(), 200);
+            Vector3D myPosition = playerCache.GetPosition();
+            Vector3D forward = playerCache.Character.WorldMatrix.Forward;
+            foreach (var ent in nearbyEntities)
             {
                 IMyCubeGrid grid = ent as IMyCubeGrid;
-                if (grid == null) continue;
+                if (grid == null || previewGrids.Contains(ent as MyCubeGrid)) continue;
+                if ((grid.GetPosition() - myPosition).Dot(forward) < 0) continue; // behind us
 
-                if (previewGrids.Contains(grid)) continue;
-                var myPosition = playerCache.GetPosition();
-                var vectorToAste = grid.GetPosition() - myPosition;
-                var relativeVector = Vector3D.TransformNormal(vectorToAste, MatrixD.Transpose(playerCache.Character.WorldMatrix));
-                if (relativeVector.Z > 0) // behind us
-                    continue;
+                nearbyGrids.Add(grid);
+            }
 
+            nearbyEntities.Clear();
+        }
+
+        private void DrawBoundingBox()
+        {
+            if (ticks % 10 == 0)
+                RefreshNearbyGrids();
+
+            Color otherCol = Color.White;
+            foreach (var grid in nearbyGrids)
+            {
+                if (grid.MarkedForClose) continue;
                 BoundingBoxD boundingBoxD = grid.PositionComp.LocalAABB;
                 MatrixD matrixD = grid.PositionComp.WorldMatrixRef;
-                MySimpleObjectDraw.DrawTransparentBox(ref matrixD, ref boundingBoxD, ref otherCol, MySimpleObjectRasterizer.Wireframe, 1, 0.04f, null, MyStringId.GetOrCompute("WeaponLaser"), false, -1, MyBillboard.BlendTypeEnum.Standard, 1f, null);
+                MySimpleObjectDraw.DrawTransparentBox(ref matrixD, ref boundingBoxD, ref otherCol, MySimpleObjectRasterizer.Wireframe, 1, 0.04f, null, LineMaterial, false, -1, MyBillboard.BlendTypeEnum.Standard, 1f, null);
             }
 
             Color color = allowSpawn ? Color.LightGreen : Color.Red;
@@ -522,7 +546,7 @@ namespace CustomHangar
             {
                 BoundingBoxD boundingBoxD = grid.PositionComp.LocalAABB;
                 MatrixD matrixD = grid.PositionComp.WorldMatrixRef;
-                MySimpleObjectDraw.DrawTransparentBox(ref matrixD, ref boundingBoxD, ref color, MySimpleObjectRasterizer.Wireframe, 1, 0.04f, null, MyStringId.GetOrCompute("WeaponLaser"), false, -1, MyBillboard.BlendTypeEnum.Standard, 1f, null);
+                MySimpleObjectDraw.DrawTransparentBox(ref matrixD, ref boundingBoxD, ref color, MySimpleObjectRasterizer.Wireframe, 1, 0.04f, null, LineMaterial, false, -1, MyBillboard.BlendTypeEnum.Standard, 1f, null);
             }
         }
 
@@ -630,14 +654,14 @@ namespace CustomHangar
 
                 MatrixD mat = MatrixD.CreateWorld(area.areaCenter);
                 Color color = Color.LightBlue;
-                MySimpleObjectDraw.DrawTransparentSphere(ref mat, area.areaRadius, ref color, MySimpleObjectRasterizer.Wireframe, 70, null, MyStringId.GetOrCompute("WeaponLaser"), 1f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
+                MySimpleObjectDraw.DrawTransparentSphere(ref mat, area.areaRadius, ref color, MySimpleObjectRasterizer.Wireframe, 70, null, LineMaterial, 1f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
             }
 
             if (config.spawnNearbyConfig.allowSpawnNearby)
             {
                 MatrixD mat = MatrixD.CreateWorld(original);
                 Color color = Color.LightGreen;
-                MySimpleObjectDraw.DrawTransparentSphere(ref mat, config.spawnNearbyConfig.nearbyRadius, ref color, MySimpleObjectRasterizer.Wireframe, 70, null, MyStringId.GetOrCompute("WeaponLaser"), .09f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
+                MySimpleObjectDraw.DrawTransparentSphere(ref mat, config.spawnNearbyConfig.nearbyRadius, ref color, MySimpleObjectRasterizer.Wireframe, 70, null, LineMaterial, .09f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
             }
         }
 
@@ -688,14 +712,7 @@ namespace CustomHangar
                     return;
                 }
 
-                if (config.enemyCheckConfig.enableBlockCheck)
-                {
-                    //MyAPIGateway.Entities.OnEntityAdd += OnBlockAdded;
-                    //MyAPIGateway.Entities.OnEntityRemove += OnBlockRemoved;
-                    MyEntities.OnEntityCreate += OnBlockAdded;
-                    MyEntities.OnEntityRemove += OnBlockRemoved;
-                    ClientGetBlocks();
-                }
+                StartBlockTracking();
 
                 if (isServer)
                 {
@@ -749,12 +766,14 @@ namespace CustomHangar
             spawnGridId = 0;
             hudNotify?.Hide();
             hudNotify = null;
+            hudShown = false;
             spawnError = SpawnError.None;
             playerWallet = 0;
             factionWallet = 0;
             enableInput = false;
             Utils.RemoveSpawnLocationsClientGPS();
             inGridPlacementView = false;
+            nearbyGrids.Clear();
         }
 
         /// <summary>
@@ -965,14 +984,17 @@ namespace CustomHangar
                 storeTimer--;
         }
 
+        readonly List<IMyFaction> cooldownKeys = new List<IMyFaction>();
+
         private void RunDelayTimers()
         {
             if (ticks % 60 != 0) return;
 
             if (cooldownTimers.Count > 0)
             {
-                List<IMyFaction> keys = cooldownTimers.Keys.ToList();
-                foreach (var faction in keys)
+                cooldownKeys.Clear();
+                cooldownKeys.AddRange(cooldownTimers.Keys);
+                foreach (var faction in cooldownKeys)
                 {
                     for (int i = cooldownTimers[faction].timers.Count - 1; i >= 0; i--)
                     {
@@ -2086,54 +2108,79 @@ namespace CustomHangar
             return MyVisualScriptLogicProvider.GetPlayersName(playerId) ?? string.Empty;
         }
 
-        private void OnBlockAdded(IMyEntity entity)
+        /// <summary>
+        /// Enemy block check (EnableBlockChecking): keeps a set of the configured block types that exist in the world.
+        /// Grids are scanned when added and watched for block changes; cube blocks never raise MyEntities.OnEntityCreate.
+        /// </summary>
+        private void StartBlockTracking()
         {
-            IMyCubeBlock block = entity as IMyCubeBlock;
-            if (block == null) return;
+            if (blockTracking || config == null || !config.enemyCheckConfig.enableBlockCheck) return;
+            blockTracking = true;
 
-            MyDefinitionId blockDef = block.BlockDefinition;
-            foreach(var data in config.enemyCheckConfig.blockTypes)
-            {
-                foreach(var subtype in data.blockSubtypes.subtype)
-                {
-                    MyDefinitionId id;
-                    if (string.IsNullOrEmpty(subtype))
-                        MyDefinitionId.TryParse(data.blockType, out id);
-                    else
-                        MyDefinitionId.TryParse(data.blockType, subtype, out id);
+            enemyCheckBlockIds.Clear();
+            Utils.ParseBlockTypes(config.enemyCheckConfig.blockTypes, enemyCheckBlockIds, true);
 
-                    if (id == null) continue;
-                    if (blockDef == id)
-                    {
-                        if (!enemyBlockCheckList.Contains(block))
-                            enemyBlockCheckList.Add(block);
-                    }
-                }
-            }
-        }
-
-        private void ClientGetBlocks()
-        {
-            HashSet<IMyEntity> entities = new HashSet<IMyEntity>();
+            MyAPIGateway.Entities.OnEntityAdd += OnEntityAdded;
+            var entities = new HashSet<IMyEntity>();
             MyAPIGateway.Entities.GetEntities(entities);
             foreach (var entity in entities)
-            {
-                IMyCubeGrid grid = entity as IMyCubeGrid;
-                if (grid == null) continue;
-
-                var blocks = grid.GetFatBlocks<IMyCubeBlock>();
-                foreach(var block in blocks)
-                    OnBlockAdded(block);
-            }
+                OnEntityAdded(entity);
         }
 
-        private void OnBlockRemoved(IMyEntity entity)
+        private void StopBlockTracking()
         {
-            IMyCubeBlock block = entity as IMyCubeBlock;
-            if (block == null) return;
+            MyAPIGateway.Entities.OnEntityAdd -= OnEntityAdded;
+            foreach (var grid in trackedGrids)
+            {
+                grid.OnBlockAdded -= OnSlimBlockAdded;
+                grid.OnBlockRemoved -= OnSlimBlockRemoved;
+                grid.OnClose -= OnTrackedGridClosed;
+            }
 
-            if (enemyBlockCheckList.Contains(block))
-                enemyBlockCheckList.Remove(block);
+            trackedGrids.Clear();
+            enemyBlockCheckList.Clear();
+            blockTracking = false;
+        }
+
+        private void OnEntityAdded(IMyEntity entity)
+        {
+            IMyCubeGrid grid = entity as IMyCubeGrid;
+            MyCubeGrid cubeGrid = entity as MyCubeGrid;
+            if (grid == null || cubeGrid == null || cubeGrid.IsPreview || !trackedGrids.Add(grid)) return;
+
+            grid.OnBlockAdded += OnSlimBlockAdded;
+            grid.OnBlockRemoved += OnSlimBlockRemoved;
+            grid.OnClose += OnTrackedGridClosed;
+            foreach (var block in cubeGrid.GetFatBlocks())
+                TrackBlock(block as IMyCubeBlock);
+        }
+
+        private void TrackBlock(IMyCubeBlock block)
+        {
+            if (block != null && enemyCheckBlockIds.Contains(block.BlockDefinition))
+                enemyBlockCheckList.Add(block);
+        }
+
+        private void OnSlimBlockAdded(IMySlimBlock slim)
+        {
+            TrackBlock(slim.FatBlock);
+        }
+
+        private void OnSlimBlockRemoved(IMySlimBlock slim)
+        {
+            if (slim.FatBlock != null)
+                enemyBlockCheckList.Remove(slim.FatBlock);
+        }
+
+        private void OnTrackedGridClosed(IMyEntity entity)
+        {
+            IMyCubeGrid grid = entity as IMyCubeGrid;
+            if (grid == null || !trackedGrids.Remove(grid)) return;
+
+            grid.OnBlockAdded -= OnSlimBlockAdded;
+            grid.OnBlockRemoved -= OnSlimBlockRemoved;
+            grid.OnClose -= OnTrackedGridClosed;
+            enemyBlockCheckList.RemoveWhere(block => block.CubeGrid == grid);
         }
 
         public void ToolEquipped(long playerId, string typeId, string subTypeId)
@@ -2158,9 +2205,8 @@ namespace CustomHangar
         {
             //Instance = null;
             //MyAPIGateway.Multiplayer.UnregisterMessageHandler(NetworkHandle, MessageHandler);
-            // Unhook unconditionally: config can still be null on a client that never received it
-            MyEntities.OnEntityCreate -= OnBlockAdded;
-            MyEntities.OnEntityRemove -= OnBlockRemoved;
+            StopBlockTracking();
+            Utils.ResetCaches();
 
             MyAPIGateway.Utilities.MessageEntered -= ChatHandler;
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(NetworkHandle, Comms.MessageHandler);
