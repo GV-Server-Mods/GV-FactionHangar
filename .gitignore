@@ -4,7 +4,6 @@ obj/
 *.user
 *.suo
 .mdk/
-mdk.ini
 mdk.local.ini
 *.bak
 *.orig

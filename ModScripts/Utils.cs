@@ -20,7 +20,6 @@ using VRage.Utils;
 using VRageMath;
 using VRage.Game.ModAPI.Ingame;
 using Sandbox.Engine.Utils;
-using System.Reflection.Metadata.Ecma335;
 using VRage.Compiler;
 using VRage.Game.ObjectBuilders.Definitions.SessionComponents;
 using ProtoBuf.Meta;

@@ -28,7 +28,6 @@ using VRageRender;
 using Sandbox.Game.Entities.Cube;
 using Sandbox.Game.Entities.Character;
 using System.Net.Sockets;
-using System.Reflection.Metadata.Ecma335;
 
 namespace CustomHangar
 {
