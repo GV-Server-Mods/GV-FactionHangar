@@ -1,5 +1,6 @@
 ﻿using EmptyKeys.UserInterface.Generated.StoreBlockView_Bindings;
 using Sandbox.Common.ObjectBuilders;
+using Sandbox.Definitions;
 using Sandbox.Game;
 using Sandbox.Game.Entities;
 using Sandbox.Game.EntityComponents;
@@ -213,95 +214,225 @@ namespace CustomHangar
 
         }
 
+        /// <summary>Same radius the client uses to list grids it can store (plus the grid's own size).</summary>
+        const double StoreRange = 500.0;
+
+        public static void Reject(long playerId, string message)
+        {
+            MyVisualScriptLogicProvider.SendChatMessageColored(message, Color.Red, "[FactionHangar]", playerId, "Red");
+        }
+
+        /// <summary>Seconds left on a faction cooldown, 0 if none.</summary>
+        public static int FactionCooldownLeft(IMyFaction faction, TimerType type)
+        {
+            FactionTimers timers;
+            if (faction == null || !Session.Instance.cooldownTimers.TryGetValue(faction, out timers)) return 0;
+            foreach (var timer in timers.timers)
+                if (timer.type == type) return Math.Max(timer.time, 1);
+
+            return 0;
+        }
+
+        /// <summary>Seconds left on a private hangar cooldown, 0 if none.</summary>
+        public static int PrivateCooldownLeft(Dictionary<long, int> cooldownEnds, long playerId)
+        {
+            int end;
+            if (!cooldownEnds.TryGetValue(playerId, out end)) return 0;
+            int ticksLeft = end - Session.Instance.ticks;
+            if (ticksLeft <= 0)
+            {
+                cooldownEnds.Remove(playerId);
+                return 0;
+            }
+
+            return (ticksLeft + 59) / 60;
+        }
+
+        /// <summary>Ownership rules for storing: private = own grid; faction = faction grid, and members only their own.</summary>
+        public static bool CanStoreGrid(VRage.Game.ModAPI.IMyCubeGrid grid, long requesterId, HangarType hangarType, out string reason)
+        {
+            var session = Session.Instance;
+            reason = null;
+            if (hangarType == HangarType.Private)
+            {
+                if (session.DoesPlayerOwnGrid(grid, requesterId)) return true;
+                reason = $"Grid {grid.CustomName} is not owned by you.";
+                return false;
+            }
+
+            IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(requesterId);
+            if (faction == null)
+            {
+                reason = "Need to be in a faction to store a grid in faction hangar.";
+                return false;
+            }
+
+            if (!session.DoesFactionOwnGrid(grid, faction))
+            {
+                reason = $"Grid {grid.CustomName} is not owned by you or your faction";
+                return false;
+            }
+
+            if (!faction.IsLeader(requesterId) && !session.DoesPlayerOwnGrid(grid, requesterId))
+            {
+                reason = $"Grid {grid.CustomName} is not owned by you, must be a faction leader to store grids that you don't own";
+                return false;
+            }
+
+            return true;
+        }
+
+        static bool IsQueuedForStorage(long gridId)
+        {
+            foreach (var delay in Session.Instance.hangarDelay)
+                foreach (var data in delay.gridData)
+                    if (data.gridId == gridId) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Server: queues a store request. The requester is the packet sender; each grid is re-checked here
+        /// (exists, near the requester, owned, no enemies, not already queued) and the owner and names come
+        /// from the server, never from the client.
+        /// </summary>
         public static void Storegrid(ObjectContainer packet)
         {
-            IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(packet.playerId);
-            if (packet.hangarType == HangarType.Faction)
-            {
-                if (faction == null) return;
-                if (Session.Instance.cooldownTimers.ContainsKey(faction))
-                {
-                    foreach (var timer in Session.Instance.cooldownTimers[faction].timers)
-                    {
-                        if (timer.type == TimerType.StorageCooldown)
-                        {
-                            MyVisualScriptLogicProvider.SendChatMessageColored($"Must wait {timer.time} seconds before your faction can store.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                            return;
-                        }
-                    }
-                }
+            var session = Session.Instance;
+            var config = session.config;
+            long requesterId = packet.requesterId;
+            HangarType hangarType = packet.hangarType;
+            IMyPlayer player = session.GetPlayerfromID(requesterId);
+            if (player == null || player.Character == null || packet.gridData == null || packet.gridData.Count == 0) return;
 
-                int slots = Session.Instance.allHangarData.GetFactionSlots(faction.FactionId);
-                if (slots >= Session.Instance.config.factionHangarConfig.maxFactionSlots)
+            IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(requesterId);
+            int slots;
+            int maxSlots;
+            if (hangarType == HangarType.Faction)
+            {
+                if (faction == null)
                 {
-                    MyVisualScriptLogicProvider.SendChatMessageColored($"Your faction has exceeded the amount of stored grids.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
+                    Reject(requesterId, "Need to be in a faction to store a grid in faction hangar.");
                     return;
                 }
 
-                if (packet.gridData.Count > 1)
+                int cooldown = FactionCooldownLeft(faction, TimerType.StorageCooldown);
+                if (cooldown > 0)
                 {
-                    if (slots + packet.gridData.Count > Session.Instance.config.factionHangarConfig.maxFactionSlots)
-                    {
-                        MyVisualScriptLogicProvider.SendChatMessageColored($"Storing {packet.gridData.Count} connected grids will exceed your faction slots. Please remove connected grids.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                        return;
-                    }
-                }
-            }
-
-            if (packet.hangarType == HangarType.Private)
-            {
-                int unusedSlots = Session.Instance.allHangarData.GetPrivateSlots(packet.playerId);
-                if (unusedSlots >= Session.Instance.config.privateHangarConfig.maxPrivateSlots)
-                {
-                    MyVisualScriptLogicProvider.SendChatMessageColored($"You have exceeded the {Session.Instance.config.privateHangarConfig.maxPrivateSlots} max amount of stored grids in private hangar.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
+                    Reject(requesterId, $"Must wait {cooldown} seconds before your faction can store.");
                     return;
                 }
 
-                if (packet.gridData.Count > 1)
+                slots = session.allHangarData.GetFactionSlots(faction.FactionId);
+                maxSlots = config.factionHangarConfig.maxFactionSlots;
+                if (slots >= maxSlots)
                 {
-                    if (unusedSlots + packet.gridData.Count > Session.Instance.config.privateHangarConfig.maxPrivateSlots)
-                    {
-                        MyVisualScriptLogicProvider.SendChatMessageColored($"Storing {packet.gridData.Count} connected grids will exceed your private slots of {Session.Instance.config.privateHangarConfig.maxPrivateSlots}. Please remove connected grids.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                        return;
-                    }
+                    Reject(requesterId, "Your faction has exceeded the amount of stored grids.");
+                    return;
+                }
+            }
+            else
+            {
+                int cooldown = PrivateCooldownLeft(session.privateStoreCooldownEnd, requesterId);
+                if (cooldown > 0)
+                {
+                    Reject(requesterId, $"Must wait {cooldown} seconds before you can store another grid.");
+                    return;
+                }
+
+                slots = session.allHangarData.GetPrivateSlots(requesterId);
+                maxSlots = config.privateHangarConfig.maxPrivateSlots;
+                if (slots >= maxSlots)
+                {
+                    Reject(requesterId, $"You have exceeded the {maxSlots} max amount of stored grids in private hangar.");
+                    return;
                 }
             }
 
-            int delaySeconds = packet.hangarType == HangarType.Faction ? Session.Instance.config.factionHangarConfig.factionStoreDelay : Session.Instance.config.privateHangarConfig.privateStoreDelay;
-            HangarDelayData hangarDelayData = new HangarDelayData()
+            if (slots + packet.gridData.Count > maxSlots)
             {
-                playerId = packet.playerId,
-                gridData = packet.gridData,
-                playerName = packet.stringData,
-                hangarType = packet.hangarType,
-                requesterId = packet.requesterId
-            };
+                Reject(requesterId, $"Storing {packet.gridData.Count} connected grids will exceed your hangar slots of {maxSlots}. Please remove connected grids.");
+                return;
+            }
 
-            foreach(var data in packet.gridData)
+            Vector3D playerPos = player.GetPosition();
+            var grids = new List<VRage.Game.ModAPI.IMyCubeGrid>(packet.gridData.Count);
+            foreach (var data in packet.gridData)
             {
                 VRage.ModAPI.IMyEntity ent;
-                if (!MyAPIGateway.Entities.TryGetEntityById(data.gridId, out ent)) continue;
-                if (ent == null) continue;
+                var grid = MyAPIGateway.Entities.TryGetEntityById(data.gridId, out ent) ? ent as VRage.Game.ModAPI.IMyCubeGrid : null;
+                if (grid == null || grid.MarkedForClose || grid.Physics == null)
+                {
+                    Reject(requesterId, "Failed to store grid, it no longer exists.");
+                    return;
+                }
 
-                MyCubeGrid grid = ent as MyCubeGrid;
-                if (grid == null) continue;
+                if (grids.Contains(grid) || IsQueuedForStorage(grid.EntityId))
+                {
+                    Reject(requesterId, $"Grid {grid.CustomName} is already being stored.");
+                    return;
+                }
 
-                grid.OnGridBlockDamaged += GridDamageMonitor;
+                double range = StoreRange + grid.WorldVolume.Radius;
+                if (Vector3D.DistanceSquared(grid.GetPosition(), playerPos) > range * range)
+                {
+                    Reject(requesterId, $"Grid {grid.CustomName} is too far away to store.");
+                    return;
+                }
+
+                string reason;
+                if (!CanStoreGrid(grid, requesterId, hangarType, out reason))
+                {
+                    Reject(requesterId, reason);
+                    return;
+                }
+
+                if (session.IsEnemyNearStoring(grid, hangarType, requesterId))
+                {
+                    Reject(requesterId, "Cannot store when enemy is nearby.");
+                    return;
+                }
+
+                data.gridName = grid.CustomName;
+                grids.Add(grid);
             }
-            
 
-            Session.Instance.hangarDelay.Add(hangarDelayData);
+            long ownerId = requesterId;
+            if (hangarType == HangarType.Faction && grids[0].BigOwners.Count > 0)
+                ownerId = grids[0].BigOwners[0];
+
+            string ownerName = session.GetPlayerName(ownerId);
+            if (string.IsNullOrEmpty(ownerName))
+                ownerName = MyVisualScriptLogicProvider.GetPlayersName(ownerId) ?? "";
+
+            int delaySeconds = hangarType == HangarType.Faction ? config.factionHangarConfig.factionStoreDelay : config.privateHangarConfig.privateStoreDelay;
+            HangarDelayData hangarDelayData = new HangarDelayData()
+            {
+                playerId = ownerId,
+                gridData = packet.gridData,
+                playerName = ownerName,
+                hangarType = hangarType,
+                requesterId = requesterId
+            };
+
+            foreach (var grid in grids)
+            {
+                MyCubeGrid cubeGrid = grid as MyCubeGrid;
+                if (cubeGrid != null)
+                    cubeGrid.OnGridBlockDamaged += GridDamageMonitor;
+            }
+
+            session.hangarDelay.Add(hangarDelayData);
             foreach (var grid in packet.gridData)
-                MyVisualScriptLogicProvider.SendChatMessageColored($"Storing Grid {grid.gridName} in {delaySeconds} seconds", Color.Green, "[FactionHangar]", packet.requesterId, "Green");
+                MyVisualScriptLogicProvider.SendChatMessageColored($"Storing Grid {grid.gridName} in {delaySeconds} seconds", Color.Green, "[FactionHangar]", requesterId, "Green");
 
-            if (faction != null)
-                FactionTimers.AddTimer(faction, TimerType.StorageCooldown, Session.Instance.config.factionHangarConfig.factionHangarCooldown);
+            bool privateStorage = hangarType == HangarType.Private;
+            if (privateStorage)
+                session.privateStoreCooldownEnd[requesterId] = session.ticks + config.privateHangarConfig.privateHangarCooldown * 60;
+            else
+                FactionTimers.AddTimer(faction, TimerType.StorageCooldown, config.factionHangarConfig.factionHangarCooldown);
 
-            IMyPlayer player = Session.Instance.GetPlayerfromID(packet.requesterId);
-            bool privateStorage = packet.hangarType == HangarType.Private ? true : false;
-            if (player != null)
-                Comms.AddClientCooldown(player.SteamUserId, privateStorage, TimerType.StorageCooldown);
-
+            Comms.AddClientCooldown(player.SteamUserId, privateStorage, TimerType.StorageCooldown);
         }
 
         public static void GetFactionList(ObjectContainer packet)
@@ -376,84 +507,108 @@ namespace CustomHangar
             return false;
         }
 
-        public static void GetGridData(ObjectContainer packet)
+        /// <summary>Server: access, cooldown and slot checks for loading a grid, then the stored blueprint.</summary>
+        public static bool TryGetRetrievableGrid(long playerId, HangarType hangarType, int index, out GridData gridData, out MyObjectBuilder_Definitions blueprint)
         {
-            GridData gridData = null;
-            MyObjectBuilder_Definitions ob = null;
-            if (packet.hangarType == HangarType.Faction)
-            {
-                IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(packet.playerId);
-                if (faction == null) return;
+            var session = Session.Instance;
+            gridData = null;
+            blueprint = null;
 
-                if (Session.Instance.cooldownTimers.ContainsKey(faction))
+            if (hangarType == HangarType.Faction)
+            {
+                IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerId);
+                if (faction == null)
                 {
-                    foreach (var timer in Session.Instance.cooldownTimers[faction].timers)
-                    {
-                        if (timer.type == TimerType.RetrievalCooldown)
-                        {
-                            MyVisualScriptLogicProvider.SendChatMessageColored($"Must wait {timer.time} seconds before your faction can load another grid.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                            return;
-                        }
-                    }
+                    Reject(playerId, "Need to be in a faction to load a grid in faction hangar.");
+                    return false;
                 }
 
-                bool isLeader = faction.IsLeader(packet.playerId);
+                int cooldown = FactionCooldownLeft(faction, TimerType.RetrievalCooldown);
+                if (cooldown > 0)
+                {
+                    Reject(playerId, $"Must wait {cooldown} seconds before your faction can load another grid.");
+                    return false;
+                }
 
-                gridData = Session.Instance.allHangarData.GetFactionGridData(faction.FactionId, packet.intValue);
+                gridData = session.allHangarData.GetFactionGridData(faction.FactionId, index);
                 if (gridData == null)
                 {
-                    MyVisualScriptLogicProvider.SendChatMessageColored($"Grid index {packet.intValue} is invalid", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                    return;
+                    Reject(playerId, $"Grid index {index} is invalid");
+                    return false;
                 }
 
-                if (!isLeader)
+                if (!faction.IsLeader(playerId) && gridData.owner != playerId)
                 {
-                    if (gridData.owner != packet.playerId)
-                    {
-                        MyVisualScriptLogicProvider.SendChatMessageColored($"You are not a faction leader and can ONLY access grids owned by you.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                        return;
-                    }
+                    Reject(playerId, "You are not a faction leader and can ONLY access grids owned by you.");
+                    return false;
+                }
+            }
+            else
+            {
+                int cooldown = PrivateCooldownLeft(session.privateRetrievalCooldownEnd, playerId);
+                if (cooldown > 0)
+                {
+                    Reject(playerId, $"Must wait {cooldown} seconds before you can load another grid.");
+                    return false;
                 }
 
-                MyObjectBuilderSerializer.DeserializeXML<MyObjectBuilder_Definitions>(gridData.gridPath, out ob);
-                if (ob == null)
-                    return;
+                gridData = session.allHangarData.GetPrivateGridData(playerId, index);
+                if (gridData == null)
+                {
+                    Reject(playerId, $"Grid index {index} is invalid");
+                    return false;
+                }
             }
 
-            if (packet.hangarType == HangarType.Private)
+            MyObjectBuilderSerializer.DeserializeXML<MyObjectBuilder_Definitions>(gridData.gridPath, out blueprint);
+            if (blueprint == null)
             {
-                gridData = Session.Instance.allHangarData.GetPrivateGridData(packet.playerId, packet.intValue);
-                if (gridData == null)
-                {
-                    MyVisualScriptLogicProvider.SendChatMessageColored($"Grid index {packet.intValue} is invalid", Color.Red, "[FactionHangar]", packet.playerId, "Red");
-                    return;
-                }
+                Reject(playerId, "Failed to load the stored grid.");
+                return false;
+            }
 
-                MyObjectBuilderSerializer.DeserializeXML<MyObjectBuilder_Definitions>(gridData.gridPath, out ob);
-                if (ob == null)
-                    return;
+            return true;
+        }
+
+        public static MyObjectBuilder_CubeGrid[] GetBlueprintGrids(MyObjectBuilder_Definitions blueprint)
+        {
+            if (blueprint?.ShipBlueprints == null || blueprint.ShipBlueprints.Length == 0) return null;
+            MyObjectBuilder_ShipBlueprintDefinition bpDef = blueprint.ShipBlueprints[0];
+            if (bpDef?.CubeGrids == null || bpDef.CubeGrids.Length == 0) return null;
+            return bpDef.CubeGrids;
+        }
+
+        /// <summary>Server: original-location spawn, or send the preview data (with server-side mass) to the client.</summary>
+        public static void GetGridData(ObjectContainer packet)
+        {
+            var session = Session.Instance;
+            GridData gridData;
+            MyObjectBuilder_Definitions ob;
+            if (!TryGetRetrievableGrid(packet.playerId, packet.hangarType, packet.intValue, out gridData, out ob)) return;
+
+            MyObjectBuilder_CubeGrid[] cubeGridObs = GetBlueprintGrids(ob);
+            if (cubeGridObs == null || !cubeGridObs[0].PositionAndOrientation.HasValue)
+            {
+                Reject(packet.playerId, "Failed to load the stored grid.");
+                return;
             }
 
             if (packet.originalLocation)
             {
-                MyObjectBuilder_CubeGrid[] cubeGridObs = Session.Instance.GetGridFromGridData(ob, packet.intValue, packet.hangarType);
-                if (cubeGridObs == null) return;
-
-
-                Session.Instance.spawnType = SpawnType.Original;
                 Vector3D originalPos = cubeGridObs[0].PositionAndOrientation.Value.Position;
-                if (!IsInOwnFactionSafeZone(originalPos, packet.playerId) && Session.Instance.IsEnemyNear(cubeGridObs[0], packet.playerId))
+                if (!IsInOwnFactionSafeZone(originalPos, packet.playerId) && SpawnRules.IsEnemyNear(originalPos, session.config.spawnOriginalConfig.originalEnemyCheck, packet.playerId))
                 {
-                    MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy nearby, failed to spawn from hangar.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
+                    Reject(packet.playerId, "Enemy nearby, failed to spawn from hangar.");
                     return;
                 }
 
-                Session.Instance.SpawnGridsFromOb(cubeGridObs.ToList(), packet.intValue, packet.hangarType, packet.playerId, 0, SpawnType.Original, !packet.force);
-                Session.Instance.spawnType = SpawnType.None;
+                session.SpawnGridsFromOb(new List<MyObjectBuilder_CubeGrid>(cubeGridObs), packet.intValue, packet.hangarType, packet.playerId, 0, SpawnType.Original, !packet.force);
                 return;
             }
 
-            Comms.SendOBToClient(ob, packet.steamId, packet.intValue, packet.hangarType);
+            double mass = SpawnRules.GetBlueprintMass(cubeGridObs);
+            bool costBypass = gridData.autoHangared && session.config.autoHangarConfig.autoBypassSpawnCost;
+            Comms.SendOBToClient(ob, packet.steamId, packet.intValue, packet.hangarType, gridData.gridId, mass, costBypass);
         }
 
         public static void CreateNullShipBlueprint(string path)
@@ -471,50 +626,34 @@ namespace CustomHangar
             MyObjectBuilderSerializer.SerializeXML(path, false, myObjectBuilder_Definitions);
         }
 
+        /// <summary>
+        /// Charges a spawn. Faction hangar: faction wallet if it can pay, otherwise the player's.
+        /// Private hangar: the player's wallet only (same rule as SpawnRules.CanAfford).
+        /// </summary>
         public static void UpdateBalance(long playerId, long amount, int index, HangarType hangarType)
         {
-            if (!Session.Instance.isServer) return;
+            var session = Session.Instance;
+            if (!session.isServer || amount <= 0) return;
 
             IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerId);
-            long current = 0;
-            if (faction != null)
-            {
-                if (hangarType == HangarType.Faction)
-                {
-                    GridData data = Session.Instance.allHangarData.GetFactionGridData(faction.FactionId, index);
-                    if (data != null)
-                        if (data.autoHangared && Session.Instance.config.autoHangarConfig.autoBypassSpawnCost)
-                            return;
-                }
-                else
-                {
-                    GridData data = Session.Instance.allHangarData.GetPrivateGridData(playerId, index);
-                    if (data != null)
-                        if (data.autoHangared && Session.Instance.config.autoHangarConfig.autoBypassSpawnCost)
-                            return;
-                }
+            GridData data;
+            if (hangarType == HangarType.Faction)
+                data = faction != null ? session.allHangarData.GetFactionGridData(faction.FactionId, index) : null;
+            else
+                data = session.allHangarData.GetPrivateGridData(playerId, index);
 
-                faction.TryGetBalanceInfo(out current);
-                if (amount <= current)
-                {
-                    faction.RequestChangeBalance(-amount);
-                    return;
-                } 
+            if (data != null && data.autoHangared && session.config.autoHangarConfig.autoBypassSpawnCost)
+                return;
+
+            long current;
+            if (hangarType == HangarType.Faction && faction != null && faction.TryGetBalanceInfo(out current) && amount <= current)
+            {
+                faction.RequestChangeBalance(-amount);
+                return;
             }
 
-            IMyPlayer player = Session.Instance.GetPlayerfromID(playerId);
-            if (player == null) return;
-
-            if (hangarType == HangarType.Private)
-            {
-                GridData data = Session.Instance.allHangarData.GetPrivateGridData(playerId, index);
-                if (data != null)
-                    if (data.autoHangared && Session.Instance.config.autoHangarConfig.autoBypassSpawnCost)
-                        return;
-            }
-
-            player.TryGetBalanceInfo(out current);
-            if (amount <= current)
+            IMyPlayer player = session.GetPlayerfromID(playerId);
+            if (player != null && player.TryGetBalanceInfo(out current) && amount <= current)
                 player.RequestChangeBalance(-amount);
         }
 
@@ -677,9 +816,11 @@ namespace CustomHangar
                         var battery = baseBlock as MyObjectBuilder_BatteryBlock;
                         if (battery == null) continue;
 
-                        float remain = battery.CurrentStoredPower;
-                        //MyVisualScriptLogicProvider.ShowNotification($"Battery = {remain}", 20000);
-                        battery.CurrentStoredPower = Session.Instance.config.spawnConfig.batteryPercentage / 100;
+                        // A negative setting (default -1) leaves the stored charge as it was
+                        float batteryPct = Session.Instance.config.spawnConfig.batteryPercentage;
+                        var batteryDef = MyDefinitionManager.Static.GetCubeBlockDefinition(block.GetId()) as MyBatteryBlockDefinition;
+                        if (batteryPct >= 0 && batteryDef != null)
+                            battery.CurrentStoredPower = batteryDef.MaxStoredPower * MathHelper.Clamp(batteryPct, 0f, 100f) / 100f;
 
                         continue;
                     }
@@ -692,9 +833,9 @@ namespace CustomHangar
                         var tank = baseBlock as MyObjectBuilder_GasTank;
                         if (tank == null) continue;
 
-                        float remain = tank.FilledRatio;
-                        //MyVisualScriptLogicProvider.ShowNotification($"Gas = {remain}", 20000);
-                        tank.FilledRatio = Session.Instance.config.spawnConfig.h2Percentage / 100;
+                        float h2Pct = Session.Instance.config.spawnConfig.h2Percentage;
+                        if (h2Pct >= 0)
+                            tank.FilledRatio = MathHelper.Clamp(h2Pct, 0f, 100f) / 100f;
                     }
                 }
             }

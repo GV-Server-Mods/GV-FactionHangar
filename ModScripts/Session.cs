@@ -88,7 +88,13 @@ namespace CustomHangar
         public bool spawnClientGPS = true;
         public List<IMyCubeGrid> gridListToStore = new List<IMyCubeGrid>();
         public bool inGridPlacementView;
-        public List<MyObjectBuilder_CubeGrid> cachedOriginalOBs = new List<MyObjectBuilder_CubeGrid>();
+        public bool spawnCostBypass;
+        public long spawnGridId;
+
+        // Server: private hangar cooldown end, in session ticks, per identity
+        public readonly Dictionary<long, int> privateStoreCooldownEnd = new Dictionary<long, int>();
+        public readonly Dictionary<long, int> privateRetrievalCooldownEnd = new Dictionary<long, int>();
+        private readonly List<IMyPlayer> playerBuffer = new List<IMyPlayer>();
 
         // Client timers
         public int retrievalTimer;
@@ -125,7 +131,7 @@ namespace CustomHangar
             Instance = this;
             isServer = MyAPIGateway.Session.IsServer;
             isDedicated = MyAPIGateway.Utilities.IsDedicated;
-            MyAPIGateway.Multiplayer.RegisterMessageHandler(NetworkHandle, Comms.MessageHandler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(NetworkHandle, Comms.MessageHandler);
             MyAPIGateway.Utilities.MessageEntered += ChatHandler;
 
             if (isServer)
@@ -513,6 +519,7 @@ namespace CustomHangar
             }
         }
 
+        /// <summary>Client preview of the server's spawn decision (SpawnRules), measured at the main preview grid's centre.</summary>
         private void DetectSpawnType(bool force = false)
         {
             if (!force)
@@ -521,370 +528,47 @@ namespace CustomHangar
             if (previewGrids == null || previewGrids.Count == 0) return;
             spawnError = SpawnError.None;
 
-            // GVK: inside own faction's safezone the spawn is free and ignores nearby enemies (server re-checks)
-            bool freeZone = Utils.IsInOwnFactionSafeZone(endCoordCache, playerCache.IdentityId);
-
-            double distance = Vector3D.Distance(endCoordCache, original);
-
-            if (config.spawnNearbyConfig.allowSpawnNearby)
+            // Same point the server derives from the placement it receives
+            Vector3D center = previewGrids[0].PositionComp.WorldAABB.Center;
+            long playerId = playerCache.IdentityId;
+            long cost;
+            EnemyChecks enemyCheck;
+            bool freeZone;
+            spawnType = SpawnRules.Resolve(center, original, playerId, previewMass, out cost, out enemyCheck, out freeZone);
+            if (spawnType == SpawnType.None)
             {
-                if (distance <= config.spawnNearbyConfig.nearbyRadius)
-                {
-                    spawnType = SpawnType.Nearby;
-                    bool result = !freeZone && IsEnemyNear();
-                    if (result)
-                        spawnError = SpawnError.EnemyNearby;
-
-                    spawnCost = freeZone ? 0 : config.spawnNearbyConfig.nearbySpawnCost;
-                    bool canAfford;
-                    if (hangarType == HangarType.Faction)
-                        canAfford = spawnCost <= factionWallet ? true : spawnCost <= playerWallet;
-                    else
-                        canAfford = spawnCost <= playerWallet;
-
-                    if (!canAfford)
-                        spawnError = SpawnError.InsuffientFunds;
-
-                    bool intersecting = Utils.IsGridIntersecting(previewGrids);
-                    if (intersecting)
-                        spawnError = SpawnError.EntityBlockingPlacement;
-
-                    allowSpawn = !result && canAfford && !intersecting;
-                    UpdateHudMessage();
-                    return;
-                }
+                allowSpawn = false;
+                spawnCost = 0;
+                spawnError = SpawnError.InvalidSpawningLocation;
+                UpdateHudMessage();
+                return;
             }
 
-            foreach (var area in config.spawnAreas)
-            {
-                if (!area.enableSpawnArea) continue;
-                if (useInverseSpawnArea)
-                {
-                    if (Vector3D.Distance(endCoordCache, area.areaCenter) <= area.areaRadius) continue;
-                    spawnType = SpawnType.SpawnArea;
-                    spawnCost = freeZone ? 0 : area.spawnAreaCost;
-                    bool result = !freeZone && IsEnemyNear(area);
-                    if (result)
-                        spawnError = SpawnError.EnemyNearby;
+            spawnCost = spawnCostBypass ? 0 : cost;
+            bool enemy = !freeZone && SpawnRules.IsEnemyNear(center, enemyCheck, playerId);
+            if (enemy)
+                spawnError = SpawnError.EnemyNearby;
 
-                    bool canAfford;
-                    if (hangarType == HangarType.Faction)
-                        canAfford = spawnCost <= factionWallet ? true : spawnCost <= playerWallet;
-                    else
-                        canAfford = spawnCost <= playerWallet;
+            bool canAfford = SpawnRules.CanAfford(spawnCost, hangarType, factionWallet, playerWallet);
+            if (!canAfford)
+                spawnError = SpawnError.InsuffientFunds;
 
-                    if (!canAfford)
-                        spawnError = SpawnError.InsuffientFunds;
+            bool intersecting = Utils.IsGridIntersecting(previewGrids);
+            if (intersecting)
+                spawnError = SpawnError.EntityBlockingPlacement;
 
-                    bool intersecting = Utils.IsGridIntersecting(previewGrids);
-                    if (intersecting)
-                        spawnError = SpawnError.EntityBlockingPlacement;
-
-                    allowSpawn = !result && canAfford && !intersecting;
-                    UpdateHudMessage();
-                    return;
-                }
-                else
-                {
-                    if (Vector3D.Distance(endCoordCache, area.areaCenter) > area.areaRadius) continue;
-                    spawnType = SpawnType.SpawnArea;
-                    spawnCost = freeZone ? 0 : area.spawnAreaCost;
-                    bool result2 = !freeZone && IsEnemyNear(area);
-                    if (result2)
-                        spawnError = SpawnError.EnemyNearby;
-
-                    bool canAfford2;
-                    if (hangarType == HangarType.Faction)
-                        canAfford2 = spawnCost <= factionWallet ? true : spawnCost <= playerWallet;
-                    else
-                        canAfford2 = spawnCost <= playerWallet;
-
-                    if (!canAfford2)
-                        spawnError = SpawnError.InsuffientFunds;
-
-                    bool intersecting2 = Utils.IsGridIntersecting(previewGrids);
-                    if (intersecting2)
-                        spawnError = SpawnError.EntityBlockingPlacement;
-
-                    allowSpawn = !result2 && canAfford2 && !intersecting2;
-                    UpdateHudMessage();
-                    return;
-                }
-            }
-
-            if (config.dynamicSpawningConfig.enableDynamicSpawning)
-            {
-                spawnCost = freeZone ? 0 : CalculateCost();
-                if (!useInverseSpawnArea)
-                {
-                    spawnType = SpawnType.Dynamic;
-                    bool result = !freeZone && IsEnemyNear();
-                    if (result)
-                        spawnError = SpawnError.EnemyNearby;
-
-                    bool canAfford;
-                    if (hangarType == HangarType.Faction)
-                        canAfford = spawnCost <= factionWallet ? true : spawnCost <= playerWallet;
-                    else
-                        canAfford = spawnCost <= playerWallet;
-
-                    if (!canAfford)
-                        spawnError = SpawnError.InsuffientFunds;
-
-                    bool intersecting = Utils.IsGridIntersecting(previewGrids);
-                    if (intersecting)
-                        spawnError = SpawnError.EntityBlockingPlacement;
-
-                    allowSpawn = !result && canAfford && !intersecting;
-                    UpdateHudMessage();
-                    return;
-                }
-            }
-
-            allowSpawn = false;
-            spawnError = SpawnError.InvalidSpawningLocation;
+            allowSpawn = !enemy && canAfford && !intersecting;
             UpdateHudMessage();
         }
 
-        public bool IsEnemyNear()
-        {
-            if (previewGrids == null || previewGrids.Count == 0) return false;
-            long spawnOwner = isDedicated && isServer ? previewGrids[0].BigOwners.FirstOrDefault() : playerCache.IdentityId;
-            List<MyEntity> ents = new List<MyEntity>();
-            if (!config.enemyCheckConfig.enableBlockCheck)
-            {
-                if (spawnType == SpawnType.Nearby && config.spawnNearbyConfig.nearbyEnemyCheck.checkEnemiesNearby)
-                {
-                    GetEntitiesInSphere(ents, endCoordCache, config.spawnNearbyConfig.nearbyEnemyCheck.enemyDistanceCheck);
-                    return IsGridEnemy(ents, spawnOwner, config.spawnNearbyConfig.nearbyEnemyCheck.alliesFriendly, config.spawnNearbyConfig.nearbyEnemyCheck.omitNPCs);
-                }
-
-                if (spawnType == SpawnType.Dynamic && config.dynamicSpawningConfig.dynamicEnemyCheck.checkEnemiesNearby)
-                {
-                    GetEntitiesInSphere(ents, endCoordCache, config.dynamicSpawningConfig.dynamicEnemyCheck.enemyDistanceCheck);
-                    return IsGridEnemy(ents, spawnOwner, config.dynamicSpawningConfig.dynamicEnemyCheck.alliesFriendly, config.dynamicSpawningConfig.dynamicEnemyCheck.omitNPCs);
-                }
-            }
-            else
-            {
-                if (spawnType == SpawnType.Nearby && config.spawnNearbyConfig.nearbyEnemyCheck.checkEnemiesNearby)
-                {
-                    foreach (var block in enemyBlockCheckList)
-                    {
-                        if (Vector3D.Distance(endCoordCache, block.GetPosition()) > config.spawnNearbyConfig.nearbyEnemyCheck.enemyDistanceCheck) continue;
-                        bool result = IsBlockEnemy(block, spawnOwner, config.spawnNearbyConfig.nearbyEnemyCheck.alliesFriendly, config.spawnNearbyConfig.nearbyEnemyCheck.omitNPCs);
-
-                        if (result)
-                            return true;
-                    }
-                }
-
-                if (spawnType == SpawnType.Dynamic && config.dynamicSpawningConfig.dynamicEnemyCheck.checkEnemiesNearby)
-                {
-                    foreach (var block in enemyBlockCheckList)
-                    {
-                        if (Vector3D.Distance(endCoordCache, block.GetPosition()) > config.dynamicSpawningConfig.dynamicEnemyCheck.enemyDistanceCheck) continue;
-                        bool result = IsBlockEnemy(block, spawnOwner, config.dynamicSpawningConfig.dynamicEnemyCheck.alliesFriendly, config.dynamicSpawningConfig.dynamicEnemyCheck.omitNPCs);
-
-                        if (result)
-                            return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        public bool IsEnemyNear(MyObjectBuilder_CubeGrid gridOb, long gridOwner)
-        {
-            gridOwner = isServer && isDedicated ? gridOwner : playerCache.IdentityId;
-            Vector3D pos = gridOb.PositionAndOrientation.Value.Position;
-            List<MyEntity> ents = new List<MyEntity>();
-
-            if (!config.enemyCheckConfig.enableBlockCheck)
-            {
-                if (spawnType == SpawnType.Original && config.spawnOriginalConfig.originalEnemyCheck.checkEnemiesNearby)
-                {
-                    GetEntitiesInSphere(ents, pos, config.spawnOriginalConfig.originalEnemyCheck.enemyDistanceCheck);
-                    return IsGridEnemy(ents, gridOwner, config.spawnOriginalConfig.originalEnemyCheck.alliesFriendly, config.spawnOriginalConfig.originalEnemyCheck.omitNPCs);
-                }
-            }
-            else
-            {
-                if (spawnType == SpawnType.Original && config.spawnOriginalConfig.originalEnemyCheck.checkEnemiesNearby)
-                {
-                    foreach (var block in enemyBlockCheckList)
-                    {
-                        if (Vector3D.Distance(pos, block.GetPosition()) > config.spawnOriginalConfig.originalEnemyCheck.enemyDistanceCheck) continue;
-                        bool result = IsBlockEnemy(block, gridOwner, config.spawnOriginalConfig.originalEnemyCheck.alliesFriendly, config.spawnOriginalConfig.originalEnemyCheck.omitNPCs);
-
-                        if (result)
-                            return true;
-                    }
-                }
-            }
-            
-            return false;
-        }
-
-        private bool IsEnemyNear(SpawnAreas area)
-        {
-            if (previewGrids == null || previewGrids.Count == 0) return false;
-            long spawnOwner = isServer && isDedicated ? previewGrids[0].BigOwners.FirstOrDefault() : playerCache.IdentityId;
-            List<MyEntity> ents = new List<MyEntity>();
-
-            if (!config.enemyCheckConfig.enableBlockCheck)
-            {
-                if (area.spawnAreasEnemyCheck.checkEnemiesNearby)
-                {
-                    GetEntitiesInSphere(ents, endCoordCache, area.spawnAreasEnemyCheck.enemyDistanceCheck);
-                    return IsGridEnemy(ents, spawnOwner, area.spawnAreasEnemyCheck.alliesFriendly, area.spawnAreasEnemyCheck.omitNPCs);
-                }
-            }
-            else
-            {
-                if (area.spawnAreasEnemyCheck.checkEnemiesNearby)
-                {
-                    foreach (var block in enemyBlockCheckList)
-                    {
-                        if (Vector3D.Distance(block.GetPosition(), endCoordCache) > area.spawnAreasEnemyCheck.enemyDistanceCheck) continue;
-                        bool result = IsBlockEnemy(block, spawnOwner, area.spawnAreasEnemyCheck.alliesFriendly, area.spawnAreasEnemyCheck.omitNPCs);
-
-                        if (result)
-                            return true;
-                    }
-                }
-            }
-                
-            return false;
-        }
-
-        private bool IsEnemyNearStoring(IMyCubeGrid grid, HangarType hangarType)
+        /// <summary>Enemy check for storing a grid, using that hangar type's settings.</summary>
+        public bool IsEnemyNearStoring(IMyCubeGrid grid, HangarType hangarType, long owner)
         {
             if (grid == null) return false;
-            long owner = isServer && isDedicated ? grid.BigOwners.FirstOrDefault() : playerCache.IdentityId;
-            List<MyEntity> ents = new List<MyEntity>();
-
-            if (!config.enemyCheckConfig.enableBlockCheck)
-            {
-                if (hangarType == HangarType.Faction)
-                {
-                    if (config.factionHangarConfig.factionHangarEnemyCheck.checkEnemiesNearby)
-                    {
-                        GetEntitiesInSphere(ents, grid.GetPosition(), config.factionHangarConfig.factionHangarEnemyCheck.enemyDistanceCheck);
-                        return IsGridEnemy(ents, owner, config.factionHangarConfig.factionHangarEnemyCheck.alliesFriendly, config.factionHangarConfig.factionHangarEnemyCheck.omitNPCs);
-                    }
-                }
-
-                if (hangarType == HangarType.Private)
-                {
-                    if (config.privateHangarConfig.privateHangarEnemyCheck.checkEnemiesNearby)
-                    {
-                        GetEntitiesInSphere(ents, grid.GetPosition(), config.privateHangarConfig.privateHangarEnemyCheck.enemyDistanceCheck);
-                        return IsGridEnemy(ents, owner, config.privateHangarConfig.privateHangarEnemyCheck.alliesFriendly, config.privateHangarConfig.privateHangarEnemyCheck.omitNPCs);
-                    }
-                }
-            }
-            else
-            {
-                if (hangarType == HangarType.Faction)
-                {
-                    if (config.factionHangarConfig.factionHangarEnemyCheck.checkEnemiesNearby)
-                    {
-                        foreach (var block in enemyBlockCheckList)
-                        {
-                            if (Vector3D.Distance(grid.GetPosition(), block.GetPosition()) > config.factionHangarConfig.factionHangarEnemyCheck.enemyDistanceCheck) continue;
-                            bool result = IsBlockEnemy(block, owner, config.factionHangarConfig.factionHangarEnemyCheck.alliesFriendly, config.privateHangarConfig.privateHangarEnemyCheck.omitNPCs);
-
-                            if (result)
-                                return true;
-                        }
-                    }
-
-                    if (config.privateHangarConfig.privateHangarEnemyCheck.checkEnemiesNearby)
-                    {
-                        foreach (var block in enemyBlockCheckList)
-                        {
-                            if (Vector3D.Distance(grid.GetPosition(), block.GetPosition()) > config.privateHangarConfig.privateHangarEnemyCheck.enemyDistanceCheck) continue;
-                            bool result = IsBlockEnemy(block, owner, config.privateHangarConfig.privateHangarEnemyCheck.alliesFriendly, config.privateHangarConfig.privateHangarEnemyCheck.omitNPCs);
-
-                            if (result)
-                                return true;
-                        }
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        private bool IsGridEnemy(List<MyEntity> ents, long spawnOwner, bool alliesFriendly, bool omitNPC)
-        {
-            IMyFaction myFaction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(spawnOwner);
-            foreach (var ent in ents)
-            {
-                if (ent.MarkedForClose) continue;
-                IMyCubeGrid grid = ent as IMyCubeGrid;
-                if (grid == null) continue;
-                if (grid.Physics == null) continue;
-                //if (grid == previewGrids[0] || grid.IsSameConstructAs(previewGrids[0])) continue;
-
-                long owner = grid.BigOwners.FirstOrDefault();
-                if (owner == spawnOwner || owner == 0) continue;
-                IMyFaction otherFaction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(owner);
-                if (otherFaction != null && omitNPC)
-                    if (otherFaction.IsEveryoneNpc() || otherFaction.Tag.Length > 3) return false;
-
-                bool result = AreFactionsEnemies(myFaction, otherFaction, alliesFriendly);
-
-                if (result) return true;
-            }
-
-            return false;
-        }
-
-        private bool IsBlockEnemy(IMyCubeBlock block, long spawnOwner, bool alliesFriendly, bool omitNPC)
-        {
-            IMyFaction myFaction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(spawnOwner);
-
-
-            long owner = block.OwnerId;
-            if (owner == spawnOwner || owner == 0) return false;
-            IMyFaction otherFaction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(owner);
-            if (otherFaction != null && omitNPC)
-                if (otherFaction.IsEveryoneNpc() || otherFaction.Tag.Length > 3) return false;
-
-            bool result = AreFactionsEnemies(myFaction, otherFaction, alliesFriendly);
-            if (result) return true;
-
-            return false;
-        }
-
-        private bool AreFactionsEnemies(IMyFaction faction1, IMyFaction faction2, bool alliesFriendly)
-        {
-            if (faction1 == null || faction2 == null) return true;
-            if (faction1 == faction2) return false;
-
-            var relation = MyAPIGateway.Session.Factions.GetRelationBetweenFactions(faction1.FactionId, faction2.FactionId);
-            if (relation == MyRelationsBetweenFactions.Enemies) return true;
-            if (relation == MyRelationsBetweenFactions.Friends)
-                if (!alliesFriendly) return true;
-
-            return false;
-        }
-
-        public long CalculateCost()
-        {
-            float cost = 0;
-            double distance = Vector3D.Distance(endCoordCache, original);
-
-            if (spawnType == SpawnType.Dynamic)
-            {
-                cost = (previewMass * (float)distance) * config.dynamicSpawningConfig.costMultiplier;
-                return (long)cost;
-            }
-
-            return 0;
+            EnemyChecks check = hangarType == HangarType.Faction
+                ? config.factionHangarConfig.factionHangarEnemyCheck
+                : config.privateHangarConfig.privateHangarEnemyCheck;
+            return SpawnRules.IsEnemyNear(grid.GetPosition(), check, owner);
         }
 
         private void DrawBoundingBox()
@@ -1103,13 +787,13 @@ namespace CustomHangar
 
         public bool TrySpawnPlacement()
         {
+            if (previewGrids.Count == 0) return false;
+            DetectSpawnType(true);
             if (!allowSpawn) return false;
 
-            long playerId = MyAPIGateway.Session.LocalHumanPlayer.IdentityId;
-            List<MyObjectBuilder_CubeGrid> obs = new List<MyObjectBuilder_CubeGrid>();
-            //GetObFromPreview(obs);
-            UpdateCachedOBsPositionOrientation(obs);
-            Comms.SendGridsToSpawn(obs, spawnIndex, hangarType, playerId, spawnCost, spawnType);
+            // Only the slot and the main grid's placement are sent; the server reloads the stored grids.
+            MatrixD placement = previewGrids[0].WorldMatrix;
+            Comms.SendGridsToSpawn(spawnIndex, hangarType, spawnGridId, new MyPositionAndOrientation(ref placement));
 
             RemovePreviewGrids();
 
@@ -1123,7 +807,7 @@ namespace CustomHangar
 
             previewGrids.Clear();
             ResetClientValues();
-            
+
         }
 
         private void ResetClientValues()
@@ -1134,10 +818,11 @@ namespace CustomHangar
             hangarType = HangarType.Faction;
             original = new Vector3D();
             previewMass = 0;
-            useInverseSpawnArea = false;
             spawnType = SpawnType.None;
             spawnCost = 0;
-            hudNotify.Hide();
+            spawnCostBypass = false;
+            spawnGridId = 0;
+            hudNotify?.Hide();
             hudNotify = null;
             spawnError = SpawnError.None;
             playerWallet = 0;
@@ -1145,34 +830,87 @@ namespace CustomHangar
             enableInput = false;
             Utils.RemoveSpawnLocationsClientGPS();
             inGridPlacementView = false;
-            cachedOriginalOBs.Clear();
         }
 
-        public void GetObFromPreview(List<MyObjectBuilder_CubeGrid> list)
+        /// <summary>
+        /// Server: a placed (not original-location) unhangar request. The client only names the hangar slot and
+        /// the main grid's placement; grids, spawn type, enemy check and cost are all decided here.
+        /// On any rejection nothing spawns and nothing is charged.
+        /// </summary>
+        public void HandleSpawnRequest(ObjectContainer request)
         {
-            list.Clear();
-            foreach(var grid in previewGrids)
+            long playerId = request.playerId;
+            IMyPlayer player = GetPlayerfromID(playerId);
+            if (player == null) return;
+
+            GridData gridData;
+            MyObjectBuilder_Definitions blueprint;
+            if (!Utils.TryGetRetrievableGrid(playerId, request.hangarType, request.intValue, out gridData, out blueprint)) return;
+
+            if (gridData.gridId != request.gridId)
             {
-                MyObjectBuilder_CubeGrid ob = grid.GetObjectBuilder() as MyObjectBuilder_CubeGrid;
-                list.Add(ob);
+                Utils.Reject(playerId, "That hangar slot has changed since the preview opened. Load the grid again.");
+                return;
             }
-        }
 
-        public void UpdateCachedOBsPositionOrientation(List<MyObjectBuilder_CubeGrid> obList)
-        {
-            obList.Clear();
-            foreach(var grid in previewGrids)
+            MyObjectBuilder_CubeGrid[] obs = Utils.GetBlueprintGrids(blueprint);
+            if (obs == null || !obs[0].PositionAndOrientation.HasValue)
             {
-                foreach(var obCached in cachedOriginalOBs)
-                {
-                    if (grid.DisplayName != obCached.DisplayName) continue;
-                    MyObjectBuilder_CubeGrid ob = grid.GetObjectBuilder() as MyObjectBuilder_CubeGrid;
-                    if (ob == null) continue;
+                Utils.Reject(playerId, "Failed to load the stored grid.");
+                return;
+            }
 
-                    obCached.PositionAndOrientation = ob.PositionAndOrientation;
-                    obList.Add(obCached);
+            Vector3D original = obs[0].PositionAndOrientation.Value.Position;
+            double mass = SpawnRules.GetBlueprintMass(obs);
+            if (!SpawnRules.ApplyPlacement(obs, request.placement))
+            {
+                Utils.Reject(playerId, "Invalid placement.");
+                return;
+            }
+
+            Vector3D center = SpawnRules.GetGridWorldCenter(obs[0]);
+            if (Vector3D.DistanceSquared(center, player.GetPosition()) > SpawnRules.MaxPlacementDistance * SpawnRules.MaxPlacementDistance)
+            {
+                Utils.Reject(playerId, "Placement is too far away from you.");
+                return;
+            }
+
+            long cost;
+            EnemyChecks enemyCheck;
+            bool freeZone;
+            SpawnType resolvedType = SpawnRules.Resolve(center, original, playerId, mass, out cost, out enemyCheck, out freeZone);
+            if (resolvedType == SpawnType.None)
+            {
+                Utils.Reject(playerId, "Not a valid spawning location.");
+                return;
+            }
+
+            if (!freeZone && SpawnRules.IsEnemyNear(center, enemyCheck, playerId))
+            {
+                Utils.Reject(playerId, "Enemy nearby, failed to spawn from hangar.");
+                return;
+            }
+
+            if (gridData.autoHangared && config.autoHangarConfig.autoBypassSpawnCost)
+                cost = 0;
+
+            if (cost > 0)
+            {
+                long factionBalance = 0;
+                long playerBalance = 0;
+                IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerId);
+                if (request.hangarType == HangarType.Faction && faction != null)
+                    faction.TryGetBalanceInfo(out factionBalance);
+                player.TryGetBalanceInfo(out playerBalance);
+
+                if (!SpawnRules.CanAfford(cost, request.hangarType, factionBalance, playerBalance))
+                {
+                    Utils.Reject(playerId, $"Insufficient funds, spawning here costs {cost} SC.");
+                    return;
                 }
             }
+
+            SpawnGridsFromOb(new List<MyObjectBuilder_CubeGrid>(obs), request.intValue, request.hangarType, playerId, cost, resolvedType, true);
         }
 
         // Server
@@ -1180,10 +918,6 @@ namespace CustomHangar
         {
             IMyPlayer player = GetPlayerfromID(playerId);
             IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerId);
-
-            // GVK: the server checks the own-faction safezone itself rather than trusting the client's cost
-            if (obs.Count > 0 && obs[0].PositionAndOrientation.HasValue && Utils.IsInOwnFactionSafeZone(obs[0].PositionAndOrientation.Value.Position, playerId))
-                cost = 0;
 
             MyAPIGateway.Entities.RemapObjectBuilderCollection(obs);
             IMyCubeGrid mainGrid = null;
@@ -1257,7 +991,7 @@ namespace CustomHangar
                 {
                     Utils.CheckGridSpawnLimits(mainGrid, faction, sentHangarType, index, spawnType, playerId);
                     Utils.UpdateBalance(playerId, cost, index, sentHangarType);
-                    FactionTimers.AddTimer(faction, TimerType.RetrievalCooldown, config.factionHangarConfig.factionHangarCooldown);
+                    FactionTimers.AddTimer(faction, TimerType.RetrievalCooldown, config.factionHangarConfig.factionRetrievalCooldown);
                     allHangarData.RemoveFactionData(faction.FactionId, index, true);
                 }
 
@@ -1270,6 +1004,7 @@ namespace CustomHangar
                 Utils.CheckGridSpawnLimits(mainGrid, null, sentHangarType, index, spawnType, playerId);
                 Utils.UpdateBalance(playerId, cost, index, sentHangarType);
                 allHangarData.RemovePrivateData(playerId, index, true);
+                privateRetrievalCooldownEnd[playerId] = ticks + config.privateHangarConfig.privateRetrievalCooldown * 60;
                 if (player != null)
                     Comms.AddClientCooldown(player.SteamUserId, true, TimerType.RetrievalCooldown);
             }
@@ -1331,7 +1066,7 @@ namespace CustomHangar
                             IMyCubeGrid grid = entity as IMyCubeGrid;
                             if (grid != null)
                             {
-                                if (IsEnemyNearStoring(grid, hangarDelay[i].hangarType))
+                                if (IsEnemyNearStoring(grid, hangarDelay[i].hangarType, hangarDelay[i].requesterId))
                                 {
                                     MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy is now to close to store, halting all storage requests", Color.Red, "[FactionHangar]", hangarDelay[i].playerId, "Red");
                                     Utils.RemoveGridDamageMontior(hangarDelay[i].gridData);
@@ -1364,7 +1099,7 @@ namespace CustomHangar
                             IMyCubeGrid grid = entity as IMyCubeGrid;
                             if (grid != null)
                             {
-                                if (IsEnemyNearStoring(grid, hangarDelay[i].hangarType))
+                                if (IsEnemyNearStoring(grid, hangarDelay[i].hangarType, hangarDelay[i].requesterId))
                                 {
                                     MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy is now to close to store, halting all storage requests", Color.Red, "[FactionHangar]", hangarDelay[i].playerId, "Red");
                                     Utils.RemoveGridDamageMontior(hangarDelay[i].gridData);
@@ -1536,7 +1271,7 @@ namespace CustomHangar
                         }
                     }
 
-                    if (IsEnemyNearStoring(choosenGrid, HangarType.Faction))
+                    if (IsEnemyNearStoring(choosenGrid, HangarType.Faction, client.IdentityId))
                     {
                         Comms.SendChatMessage($"Cannot store when enemy is nearby...", "Red", client.IdentityId, Color.Red);
                         //MyVisualScriptLogicProvider.SendChatMessageColored($"Cannot store when enemy is nearby...", Color.Red, "[FactionHangar]", 0, "Red");
@@ -1786,7 +1521,7 @@ namespace CustomHangar
                         return;
                     }
 
-                    if (IsEnemyNearStoring(choosenGrid, HangarType.Private))
+                    if (IsEnemyNearStoring(choosenGrid, HangarType.Private, client.IdentityId))
                     {
                         Comms.SendChatMessage($"Cannot store when enemy is nearby.", "Red", client.IdentityId, Color.Red);
                         return;
@@ -2100,6 +1835,15 @@ namespace CustomHangar
             IMyCubeGrid grid = entity as IMyCubeGrid;
             if (grid == null) return;
 
+            // Ownership or faction membership can change during the store delay
+            string reason;
+            if (!autoHangar && !Utils.CanStoreGrid(grid, requesterId, privateStorage ? HangarType.Private : HangarType.Faction, out reason))
+            {
+                Utils.Reject(requesterId, $"Failed to store grid. {reason}");
+                (grid as MyCubeGrid).OnGridBlockDamaged -= Utils.GridDamageMonitor;
+                return;
+            }
+
             IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(ownerId);
 
             playerName = RemoveSpecialCharacters(playerName);
@@ -2236,21 +1980,7 @@ namespace CustomHangar
         {
             spawnIndex = index;
             hangarType = sentHangarType;
-            if (data == null) return null;
-            MyObjectBuilder_Definitions def = data as MyObjectBuilder_Definitions;
-            if (def == null) return null;
-
-            if (def.ShipBlueprints == null) return null;
-            if (def.ShipBlueprints.Length == 0) return null;
-
-            MyObjectBuilder_ShipBlueprintDefinition bpDef = def.ShipBlueprints[0];
-            if (bpDef == null) return null;
-
-            if (bpDef.CubeGrids == null) return null;
-            MyObjectBuilder_CubeGrid[] cubeGridObs = bpDef.CubeGrids;
-            if (cubeGridObs.Length == 0) return null;
-
-            return cubeGridObs;
+            return Utils.GetBlueprintGrids(data as MyObjectBuilder_Definitions);
         }
 
         public void SpawnClientSideProjectedGrid(MyObjectBuilder_CubeGrid[] cubeGridObs)
@@ -2266,7 +1996,6 @@ namespace CustomHangar
             UpdatePosition();
             DetectSpawnType(true);
             Utils.AddSpawnLocationsClientGPS();
-            cachedOriginalOBs = cubeGridObs.ToList();
 
             MyAPIGateway.Entities.RemapObjectBuilderCollection(cubeGridObs);
             MatrixD baseMat = new MatrixD();
@@ -2325,12 +2054,20 @@ namespace CustomHangar
 
         public IMyPlayer GetPlayerfromID(long playerId)
         {
-            List<IMyPlayer> players = new List<IMyPlayer>();
-            MyAPIGateway.Players.GetPlayers(players);
-            foreach(var player in players)
-                if (player.IdentityId == playerId) return player;
+            playerBuffer.Clear();
+            MyAPIGateway.Players.GetPlayers(playerBuffer);
+            IMyPlayer found = null;
+            foreach (var player in playerBuffer)
+            {
+                if (player.IdentityId == playerId)
+                {
+                    found = player;
+                    break;
+                }
+            }
 
-            return null;
+            playerBuffer.Clear();
+            return found;
         }
 
         public string GetPlayerName(long playerId)
@@ -2424,7 +2161,7 @@ namespace CustomHangar
             
 
             MyAPIGateway.Utilities.MessageEntered -= ChatHandler;
-            MyAPIGateway.Multiplayer.UnregisterMessageHandler(NetworkHandle, Comms.MessageHandler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(NetworkHandle, Comms.MessageHandler);
             Instance = null;
 
             if (!isDedicated)
