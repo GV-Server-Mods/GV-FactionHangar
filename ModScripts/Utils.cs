@@ -97,11 +97,10 @@ namespace CustomHangar
                     if (ownerFaction != null && ownerFaction.FactionId == faction.FactionId) return true;
                 }
 
+                // Read the zone's whitelist directly instead of building its full object builder
                 if (zone.AccessTypeFactions == MySafeZoneAccess.Whitelist)
-                {
-                    var zoneOb = zone.GetObjectBuilder() as MyObjectBuilder_SafeZone;
-                    if (zoneOb != null && zoneOb.Factions != null && Array.IndexOf(zoneOb.Factions, faction.FactionId) >= 0) return true;
-                }
+                    foreach (IMyFaction allowed in zone.Factions)
+                        if (allowed.FactionId == faction.FactionId) return true;
             }
 
             return false;
@@ -150,6 +149,7 @@ namespace CustomHangar
         public static void ResetCaches()
         {
             excludedBlockIds = null;
+            loadingGrids.Clear();
         }
 
         public static bool CheckForExcludedBlock(MyCubeGrid grid)
@@ -541,12 +541,11 @@ namespace CustomHangar
             return false;
         }
 
-        /// <summary>Server: access, cooldown and slot checks for loading a grid, then the stored blueprint.</summary>
-        public static bool TryGetRetrievableGrid(long playerId, HangarType hangarType, int index, out GridData gridData, out MyObjectBuilder_Definitions blueprint)
+        /// <summary>Server: access, cooldown and slot checks for loading a grid.</summary>
+        public static bool TryGetRetrievableGrid(long playerId, HangarType hangarType, int index, out GridData gridData)
         {
             var session = Session.Instance;
             gridData = null;
-            blueprint = null;
 
             if (hangarType == HangarType.Faction)
             {
@@ -594,16 +593,56 @@ namespace CustomHangar
                 }
             }
 
-            blueprint = LoadStoredBlueprint(gridData.gridPath);
-            if (GetBlueprintGrids(blueprint) == null)
+            return true;
+        }
+
+        static readonly HashSet<long> loadingGrids = new HashSet<long>();
+
+        /// <summary>
+        /// Server: checks access, reads the stored grid on a background thread, then re-checks on the game thread
+        /// (the slot or cooldown can change while the file is read) before calling onReady.
+        /// expectedGridId (0 = any) rejects a slot that no longer holds the grid the client previewed.
+        /// </summary>
+        public static void LoadRetrievableGrid(long playerId, HangarType hangarType, int index, long expectedGridId,
+            Action<GridData, MyObjectBuilder_CubeGrid[], MyObjectBuilder_Definitions> onReady)
+        {
+            GridData gridData;
+            if (!TryGetRetrievableGrid(playerId, hangarType, index, out gridData)) return;
+            if (expectedGridId != 0 && gridData.gridId != expectedGridId)
             {
-                gridData.fileMissing = true;
-                string prefix = hangarType == HangarType.Faction ? "/fh" : "/ph";
-                Reject(playerId, $"The stored file for grid [{index}] {gridData.gridName} is missing or damaged. Use {prefix} remove {index} to clear it.");
-                return false;
+                Reject(playerId, "That hangar slot has changed since the preview opened. Load the grid again.");
+                return;
             }
 
-            return true;
+            long gridId = gridData.gridId;
+            if (!loadingGrids.Add(gridId))
+            {
+                Reject(playerId, "That grid is already being loaded.");
+                return;
+            }
+
+            BlueprintIo.Read(gridData.gridPath, io =>
+            {
+                loadingGrids.Remove(gridId);
+                GridData current;
+                if (!TryGetRetrievableGrid(playerId, hangarType, index, out current)) return;
+                if (current.gridId != gridId)
+                {
+                    Reject(playerId, "That hangar slot changed while loading. Load the grid again.");
+                    return;
+                }
+
+                MyObjectBuilder_CubeGrid[] grids = GetBlueprintGrids(io.blueprint);
+                if (grids == null || !grids[0].PositionAndOrientation.HasValue)
+                {
+                    current.fileMissing = true;
+                    string prefix = hangarType == HangarType.Faction ? "/fh" : "/ph";
+                    Reject(playerId, $"The stored file for grid [{index}] {current.gridName} is missing or damaged. Use {prefix} remove {index} to clear it.");
+                    return;
+                }
+
+                onReady(current, grids, io.blueprint);
+            });
         }
 
         const string SavesFolder = "FactionHangarSaves";
@@ -656,18 +695,12 @@ namespace CustomHangar
         /// <summary>Server: original-location spawn, or send the preview data (with server-side mass) to the client.</summary>
         public static void GetGridData(ObjectContainer packet)
         {
+            LoadRetrievableGrid(packet.playerId, packet.hangarType, packet.intValue, 0, (gridData, cubeGridObs, ob) => OnGridDataLoaded(packet, gridData, cubeGridObs, ob));
+        }
+
+        static void OnGridDataLoaded(ObjectContainer packet, GridData gridData, MyObjectBuilder_CubeGrid[] cubeGridObs, MyObjectBuilder_Definitions ob)
+        {
             var session = Session.Instance;
-            GridData gridData;
-            MyObjectBuilder_Definitions ob;
-            if (!TryGetRetrievableGrid(packet.playerId, packet.hangarType, packet.intValue, out gridData, out ob)) return;
-
-            MyObjectBuilder_CubeGrid[] cubeGridObs = GetBlueprintGrids(ob);
-            if (cubeGridObs == null || !cubeGridObs[0].PositionAndOrientation.HasValue)
-            {
-                Reject(packet.playerId, "Failed to load the stored grid.");
-                return;
-            }
-
             if (packet.originalLocation)
             {
                 Vector3D originalPos = cubeGridObs[0].PositionAndOrientation.Value.Position;

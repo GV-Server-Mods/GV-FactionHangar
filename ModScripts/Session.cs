@@ -280,6 +280,9 @@ namespace CustomHangar
 
             foreach (var playerId in expiredPlayers)
                 AutoHangar(null, playerId);
+
+            if (autoHangarJobs.Count > 0)
+                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar queued {autoHangarJobs.Count} grid groups, storing 6 per second");
         }
 
         private void AutoHangar(IMyFaction faction, long playerId)
@@ -300,35 +303,60 @@ namespace CustomHangar
                 if (grid == null || grid.MarkedForClose || !handled.Add(grid.EntityId)) continue;
 
                 GetGroupByType(grid, connectedGrids, GridLinkTypeEnum.Physical);
-                bool skip = false;
                 foreach (var connectedGrid in connectedGrids)
-                {
                     handled.Add(connectedGrid.EntityId);
-                    if (skip) continue;
 
-                    // Never hangar a group that includes someone else's grid (e.g. landing-geared to an active base)
-                    if (!IsOwnedBy(connectedGrid, faction, playerId))
-                    {
-                        MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar skipped grid {grid.CustomName}: connected to {connectedGrid.CustomName}, which another player owns");
-                        skip = true;
-                        continue;
-                    }
+                // Stored a few per second from UpdateBeforeSimulation, so startup doesn't freeze on one tick
+                if (CanAutoHangarGroup(grid, connectedGrids, faction, playerId))
+                    autoHangarJobs.Enqueue(new AutoHangarJob { gridId = grid.EntityId, faction = faction, playerId = playerId });
+            }
+        }
 
-                    if (Utils.CheckForExcludedBlock(connectedGrid as MyCubeGrid))
-                        skip = true;
+        struct AutoHangarJob
+        {
+            public long gridId;
+            public IMyFaction faction;
+            public long playerId;
+        }
+
+        readonly Queue<AutoHangarJob> autoHangarJobs = new Queue<AutoHangarJob>();
+
+        /// <summary>One queued auto-hangar group per call; the group is re-checked since it may have changed while queued.</summary>
+        private void RunAutoHangarJob()
+        {
+            AutoHangarJob job = autoHangarJobs.Dequeue();
+            IMyEntity entity;
+            IMyCubeGrid grid = MyAPIGateway.Entities.TryGetEntityById(job.gridId, out entity) ? entity as IMyCubeGrid : null;
+            if (grid != null && !grid.MarkedForClose)
+            {
+                var group = new List<IMyCubeGrid>();
+                GetGroupByType(grid, group, GridLinkTypeEnum.Physical);
+                MyCubeGrid biggestGrid = (grid as MyCubeGrid)?.GetBiggestGridInGroup();
+                long owner = biggestGrid != null && biggestGrid.BigOwners.Count > 0 ? biggestGrid.BigOwners[0] : 0;
+                if (owner != 0 && CanAutoHangarGroup(grid, group, job.faction, job.playerId))
+                    RequestingGridStorage(owner, owner, biggestGrid.EntityId, GetPlayerName(owner), job.faction == null, true);
+            }
+
+            if (autoHangarJobs.Count == 0)
+                MyLog.Default.WriteLineAndConsole("[FactionHangar] - AutoHangar finished");
+        }
+
+        /// <summary>No auto-hangar for a group with an excluded block or a grid owned outside the inactive faction/player.</summary>
+        private bool CanAutoHangarGroup(IMyCubeGrid grid, List<IMyCubeGrid> group, IMyFaction faction, long playerId)
+        {
+            foreach (var connectedGrid in group)
+            {
+                // e.g. landing-geared to an active player's base
+                if (!IsOwnedBy(connectedGrid, faction, playerId))
+                {
+                    MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar skipped grid {grid.CustomName}: connected to {connectedGrid.CustomName}, which another player owns");
+                    return false;
                 }
 
-                if (skip) continue;
-
-                MyCubeGrid biggestGrid = (grid as MyCubeGrid)?.GetBiggestGridInGroup();
-                if (biggestGrid == null) continue;
-
-                long owner = biggestGrid.BigOwners.Count > 0 ? biggestGrid.BigOwners[0] : 0;
-                if (owner == 0) continue;
-
-                string playerName = GetPlayerName(owner);
-                RequestingGridStorage(owner, owner, biggestGrid.EntityId, playerName, faction == null, true);
+                if (Utils.CheckForExcludedBlock(connectedGrid as MyCubeGrid)) return false;
             }
+
+            return true;
         }
 
         /// <summary>True if the grid is unowned or owned by the expired faction (or expired player).</summary>
@@ -455,8 +483,9 @@ namespace CustomHangar
         /// <summary>Client preview of the server's spawn decision (SpawnRules), measured at the main preview grid's centre.</summary>
         private void DetectSpawnType(bool force = false)
         {
+            // 3 times a second; placing re-checks with force right before the request is sent
             if (!force)
-                if (ticks % 10 != 0) return;
+                if (ticks % 20 != 0) return;
 
             if (previewGrids == null || previewGrids.Count == 0) return;
             spawnError = SpawnError.None;
@@ -505,6 +534,8 @@ namespace CustomHangar
         }
 
         static readonly MyStringId LineMaterial = MyStringId.GetOrCompute("WeaponLaser");
+        // Spawn-zone sphere wireframe detail; line count grows with its square, 20 draws ~13x fewer lines per frame than 70
+        const int SphereDetail = 20;
         readonly List<MyEntity> nearbyEntities = new List<MyEntity>();
         readonly List<IMyCubeGrid> nearbyGrids = new List<IMyCubeGrid>();
 
@@ -654,14 +685,14 @@ namespace CustomHangar
 
                 MatrixD mat = MatrixD.CreateWorld(area.areaCenter);
                 Color color = Color.LightBlue;
-                MySimpleObjectDraw.DrawTransparentSphere(ref mat, area.areaRadius, ref color, MySimpleObjectRasterizer.Wireframe, 70, null, LineMaterial, 1f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
+                MySimpleObjectDraw.DrawTransparentSphere(ref mat, area.areaRadius, ref color, MySimpleObjectRasterizer.Wireframe, SphereDetail, null, LineMaterial, 1f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
             }
 
             if (config.spawnNearbyConfig.allowSpawnNearby)
             {
                 MatrixD mat = MatrixD.CreateWorld(original);
                 Color color = Color.LightGreen;
-                MySimpleObjectDraw.DrawTransparentSphere(ref mat, config.spawnNearbyConfig.nearbyRadius, ref color, MySimpleObjectRasterizer.Wireframe, 70, null, LineMaterial, .09f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
+                MySimpleObjectDraw.DrawTransparentSphere(ref mat, config.spawnNearbyConfig.nearbyRadius, ref color, MySimpleObjectRasterizer.Wireframe, SphereDetail, null, LineMaterial, .09f, -1, null, VRageRender.MyBillboard.BlendTypeEnum.Standard, 10f);
             }
         }
 
@@ -676,7 +707,10 @@ namespace CustomHangar
 
             // Server Only
             if (!isServer) return;
-            
+
+            if (autoHangarJobs.Count > 0 && ticks % 10 == 0)
+                RunAutoHangarJob();
+
 
             // Runs every 60 ticks (1 sec)
             RunDelayTimers();
@@ -783,26 +817,16 @@ namespace CustomHangar
         /// </summary>
         public void HandleSpawnRequest(ObjectContainer request)
         {
+            if (GetPlayerfromID(request.playerId) == null) return;
+            Utils.LoadRetrievableGrid(request.playerId, request.hangarType, request.intValue, request.gridId,
+                (gridData, obs, blueprint) => SpawnRequestLoaded(request, gridData, obs));
+        }
+
+        private void SpawnRequestLoaded(ObjectContainer request, GridData gridData, MyObjectBuilder_CubeGrid[] obs)
+        {
             long playerId = request.playerId;
             IMyPlayer player = GetPlayerfromID(playerId);
             if (player == null) return;
-
-            GridData gridData;
-            MyObjectBuilder_Definitions blueprint;
-            if (!Utils.TryGetRetrievableGrid(playerId, request.hangarType, request.intValue, out gridData, out blueprint)) return;
-
-            if (gridData.gridId != request.gridId)
-            {
-                Utils.Reject(playerId, "That hangar slot has changed since the preview opened. Load the grid again.");
-                return;
-            }
-
-            MyObjectBuilder_CubeGrid[] obs = Utils.GetBlueprintGrids(blueprint);
-            if (obs == null || !obs[0].PositionAndOrientation.HasValue)
-            {
-                Utils.Reject(playerId, "Failed to load the stored grid.");
-                return;
-            }
 
             // Stored grid centre, taken before the blueprint is moved to the placement
             Vector3D original = SpawnRules.GetGridWorldCenter(obs[0]);
@@ -1820,52 +1844,61 @@ namespace CustomHangar
                 //path = Path.Combine(MyAPIGateway.Utilities.GamePaths.ModsPath, $"{playerName}_{grid.CustomName}_{grid.EntityId}.sbc");*/
 
 
-            if (path != "")
+            MyCubeGrid cubeGrid = grid as MyCubeGrid;
+            if (cubeGrid == null) return;
+            cubeGrid.OnGridBlockDamaged -= Utils.GridDamageMonitor;
+
+            // Snapshot, add the entry and remove the grids now (nothing can change or dupe in between),
+            // then write the file in the background. If the write fails, the grids are put back.
+            Utils.RemovePlayersFromSeats(cubeGrid);
+            string displayName = grid.CustomName;
+            GridLinkTypeEnum linkType = autoHangar ? GridLinkTypeEnum.Physical : GridLinkTypeEnum.Mechanical;
+            List<MyObjectBuilder_CubeGrid> obs = GetGridGroupObs(cubeGrid, linkType);
+            MyObjectBuilder_Definitions blueprint = BuildBlueprint(obs, displayName);
+
+            GridData entry = !privateStorage && faction != null
+                ? allHangarData.AddFactionData(faction.FactionId, displayName, grid.EntityId, ownerId, path, playerName, autoHangar)
+                : allHangarData.AddPrivateData(displayName, grid.EntityId, ownerId, path, playerName, autoHangar);
+
+            CloseGridGroup(grid, linkType);
+
+            BlueprintIo.Write(path, blueprint, io =>
             {
-                Utils.RemovePlayersFromSeats(grid as MyCubeGrid);
-
-                if (CreateShipBlueprint(grid as MyCubeGrid, grid.CustomName, path, autoHangar ? GridLinkTypeEnum.Physical : GridLinkTypeEnum.Mechanical))
+                if (io.success)
                 {
-                    if (player != null && !autoHangar)
-                    {
-                        //Comms.AddClientCooldown(player.SteamUserId, privateStorage, TimerType.StorageCooldown);
-                        MyVisualScriptLogicProvider.SendChatMessageColored($"Successfully stored grid {grid.CustomName}", Color.Green, "[FactionHangar]", requesterId, "Green");
-                        MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Player {playerName} successfully stored grid {grid.CustomName}");
-                    }
-
-                    //if (faction != null && !autoHangar)
-                        //FactionTimers.AddTimer(faction, TimerType.StorageCooldown, config.factionHangarConfig.factionHangarCooldown);
-
                     if (autoHangar)
-                        MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar successfully stored grid {grid.CustomName}");
-
-                    if (!privateStorage && faction != null)
-                        allHangarData.AddFactionData(faction.FactionId, grid.CustomName, grid.EntityId, ownerId, path, playerName, autoHangar);
+                        MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar successfully stored grid {displayName}");
                     else
-                        allHangarData.AddPrivateData(grid.CustomName, grid.EntityId, ownerId, path, playerName, autoHangar);
-
-                    if (!autoHangar)
                     {
-                        MyCubeGrid cubeGrid = grid as MyCubeGrid;
-                        cubeGrid.OnGridBlockDamaged -= Utils.GridDamageMonitor;
+                        MyVisualScriptLogicProvider.SendChatMessageColored($"Successfully stored grid {displayName}", Color.Green, "[FactionHangar]", requesterId, "Green");
+                        MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Player {playerName} successfully stored grid {displayName}");
                     }
-                    
-                    CloseGridGroup(grid, autoHangar ? GridLinkTypeEnum.Physical : GridLinkTypeEnum.Mechanical);
                     return;
                 }
+
+                if (entry != null)
+                    allHangarData.RemoveEntry(entry);
+                RestoreGrids(obs);
+
+                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - {(autoHangar ? "AutoHangar" : "Player " + playerName)} failed to store grid {displayName}, grid restored");
+                if (!autoHangar)
+                    Utils.Reject(requesterId, $"Failed to store grid {displayName}, it was put back.");
+            });
+        }
+
+        /// <summary>Puts grids back exactly as snapshotted (a store whose file couldn't be written).</summary>
+        private void RestoreGrids(List<MyObjectBuilder_CubeGrid> obs)
+        {
+            MyAPIGateway.Entities.RemapObjectBuilderCollection(obs);
+            foreach (var ob in obs)
+            {
+                ob.CreatePhysics = true;
+                var ent = MyAPIGateway.Entities.CreateFromObjectBuilder(ob);
+                if (ent != null)
+                    MyAPIGateway.Entities.AddEntity(ent, true);
+                else
+                    MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Could not restore grid {ob.DisplayName}");
             }
-
-            var failedGrid = grid as MyCubeGrid;
-            if (failedGrid != null)
-                failedGrid.OnGridBlockDamaged -= Utils.GridDamageMonitor;
-
-            if (autoHangar)
-                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar failed to store grid {grid.CustomName}");
-            else
-                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Player {playerName} failed to store grid {grid.CustomName}");
-
-            if (player != null)
-                MyVisualScriptLogicProvider.SendChatMessageColored($"Failed to store grid {grid.CustomName}", Color.Red, "[FactionHangar]", requesterId, "Red");
         }
 
         public string RemoveSpecialCharacters(string str)
@@ -1892,9 +1925,8 @@ namespace CustomHangar
             }
         }
 
-        public bool CreateShipBlueprint(MyCubeGrid myCubeGrid, string blueprintName, string path, GridLinkTypeEnum groupType)
+        public MyObjectBuilder_Definitions BuildBlueprint(List<MyObjectBuilder_CubeGrid> list, string blueprintName)
         {
-            List<MyObjectBuilder_CubeGrid> list = GetGridGroupObs(myCubeGrid, groupType);
             MyObjectBuilder_ShipBlueprintDefinition myObjectBuilder_ShipBlueprintDefinition = MyObjectBuilderSerializer.CreateNewObject<MyObjectBuilder_ShipBlueprintDefinition>();
             myObjectBuilder_ShipBlueprintDefinition.Id = new MyDefinitionId(new MyObjectBuilderType(typeof(MyObjectBuilder_ShipBlueprintDefinition)), MyUtils.StripInvalidChars(blueprintName));
             myObjectBuilder_ShipBlueprintDefinition.CubeGrids = list.ToArray();
@@ -1904,17 +1936,7 @@ namespace CustomHangar
             MyObjectBuilder_Definitions myObjectBuilder_Definitions = MyObjectBuilderSerializer.CreateNewObject<MyObjectBuilder_Definitions>();
             myObjectBuilder_Definitions.ShipBlueprints = new MyObjectBuilder_ShipBlueprintDefinition[1];
             myObjectBuilder_Definitions.ShipBlueprints[0] = myObjectBuilder_ShipBlueprintDefinition;
-
-            // The grid is deleted after this, so only report success if the file was really written
-            try
-            {
-                return MyObjectBuilderSerializer.SerializeXML(path, false, myObjectBuilder_Definitions);
-            }
-            catch (Exception ex)
-            {
-                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Could not write stored grid {path}: {ex.Message}");
-                return false;
-            }
+            return myObjectBuilder_Definitions;
         }
 
         public  List<MyObjectBuilder_CubeGrid> GetGridGroupObs(MyCubeGrid cubeGrid, GridLinkTypeEnum groupType)

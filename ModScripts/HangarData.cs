@@ -37,10 +37,10 @@ namespace CustomHangar
 
         public AllHangarData() { }
 
-        public void AddFactionData(long factionId, string gridName, long gridId, long playerId, string path, string playerName, bool autoHangar)
+        public GridData AddFactionData(long factionId, string gridName, long gridId, long playerId, string path, string playerName, bool autoHangar)
         {
             IMyFaction faction = MyAPIGateway.Session.Factions.TryGetFactionById(factionId);
-            if (faction == null) return;
+            if (faction == null) return null;
 
             GridData gData = new GridData()
             {
@@ -73,7 +73,17 @@ namespace CustomHangar
             else
                 fData.factionHangarData.gridData.Add(gData);
 
+            return gData;
+        }
 
+        /// <summary>Removes one entry by reference (indexes can shift while a store is in progress).</summary>
+        public void RemoveEntry(GridData entry)
+        {
+            foreach (var fData in factionData)
+                if (fData.factionHangarData.gridData.Remove(entry)) return;
+
+            foreach (var pData in privateData)
+                if (pData.privateHangarData.gridData.Remove(entry)) return;
         }
 
         public void RemoveFactionData(long factionId, int index, bool nullBlueprint = false)
@@ -331,7 +341,7 @@ namespace CustomHangar
             return true;
         }
 
-        public void AddPrivateData(string gridName, long gridId, long playerId, string path, string playerName, bool autoHangar)
+        public GridData AddPrivateData(string gridName, long gridId, long playerId, string path, string playerName, bool autoHangar)
         {
             GridData gData = new GridData()
             {
@@ -363,6 +373,8 @@ namespace CustomHangar
             }
             else
                 pData.privateHangarData.gridData.Add(gData);
+
+            return gData;
         }
 
         public void RemovePrivateData(long playerId, int index, bool nullBlueprint = false)
