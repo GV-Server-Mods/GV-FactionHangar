@@ -314,7 +314,7 @@ namespace CustomHangar
                         continue;
                     }
 
-                    if (faction != null && Utils.CheckForExcludedBlock(connectedGrid as MyCubeGrid))
+                    if (Utils.CheckForExcludedBlock(connectedGrid as MyCubeGrid))
                         skip = true;
                 }
 
@@ -1012,87 +1012,45 @@ namespace CustomHangar
             if (hangarDelay.Count == 0) return;
             for (int i = hangarDelay.Count - 1; i >= 0; i--)
             {
-                if (hangarDelay[i].hangarType == HangarType.Faction)
+                HangarDelayData delay = hangarDelay[i];
+                bool privateStorage = delay.hangarType == HangarType.Private;
+                int storeDelay = privateStorage ? config.privateHangarConfig.privateStoreDelay : config.factionHangarConfig.factionStoreDelay;
+
+                // Enemy check every 5 s on every grid being stored
+                if (delay.timer % 5 == 0 && IsEnemyNearDelayedGrids(delay))
                 {
-                    // Added enemy nearby check while hangar delay is running
-                    if (config.factionHangarConfig.factionStoreDelay - hangarDelay[i].timer % 5 != 0)
-                    {
-                        VRage.ModAPI.IMyEntity entity;
-                        MyAPIGateway.Entities.TryGetEntityById(hangarDelay[i].gridData[0].gridId, out entity);
-                        if (entity != null)
-                        {
-                            IMyCubeGrid grid = entity as IMyCubeGrid;
-                            if (grid != null)
-                            {
-                                if (IsEnemyNearStoring(grid, hangarDelay[i].hangarType, hangarDelay[i].requesterId))
-                                {
-                                    MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy is now to close to store, halting all storage requests", Color.Red, "[FactionHangar]", hangarDelay[i].playerId, "Red");
-                                    Utils.RemoveGridDamageMontior(hangarDelay[i].gridData);
-                                    hangarDelay.RemoveAtFast(i);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    if (hangarDelay[i].timer >= config.factionHangarConfig.factionStoreDelay)
-                    {
-                        foreach (var grid in hangarDelay[i].gridData)
-                            RequestingGridStorage(hangarDelay[i].requesterId, hangarDelay[i].playerId, grid.gridId, hangarDelay[i].playerName);
-
-                        hangarDelay.RemoveAtFast(i);
-                        continue;
-                    }
+                    MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy is now to close to store, halting all storage requests", Color.Red, "[FactionHangar]", delay.requesterId, "Red");
+                    Utils.RemoveGridDamageMontior(delay.gridData);
+                    hangarDelay.RemoveAtFast(i);
+                    continue;
                 }
 
-                if (hangarDelay[i].hangarType == HangarType.Private)
+                if (delay.timer >= storeDelay)
                 {
-                    // Added enemy nearby check while hangar delay is running
-                    if (config.privateHangarConfig.privateStoreDelay - hangarDelay[i].timer % 5 != 0)
-                    {
-                        VRage.ModAPI.IMyEntity entity;
-                        MyAPIGateway.Entities.TryGetEntityById(hangarDelay[i].gridData[0].gridId, out entity);
-                        if (entity != null)
-                        {
-                            IMyCubeGrid grid = entity as IMyCubeGrid;
-                            if (grid != null)
-                            {
-                                if (IsEnemyNearStoring(grid, hangarDelay[i].hangarType, hangarDelay[i].requesterId))
-                                {
-                                    MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy is now to close to store, halting all storage requests", Color.Red, "[FactionHangar]", hangarDelay[i].playerId, "Red");
-                                    Utils.RemoveGridDamageMontior(hangarDelay[i].gridData);
-                                    hangarDelay.RemoveAtFast(i);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
+                    foreach (var grid in delay.gridData)
+                        RequestingGridStorage(delay.requesterId, delay.playerId, grid.gridId, delay.playerName, privateStorage);
 
-                    if (hangarDelay[i].timer >= config.privateHangarConfig.privateStoreDelay)
-                    {
-                        foreach (var grid in hangarDelay[i].gridData)
-                            RequestingGridStorage(hangarDelay[i].requesterId, hangarDelay[i].playerId, grid.gridId, hangarDelay[i].playerName, true);
-
-                        hangarDelay.RemoveAtFast(i);
-                        continue;
-                    }
+                    hangarDelay.RemoveAtFast(i);
+                    continue;
                 }
 
-                hangarDelay[i].timer++;
-
-                if (hangarDelay[i].hangarType == HangarType.Faction)
-                {
-                    if (config.factionHangarConfig.factionStoreDelay - hangarDelay[i].timer == 10)
-                        foreach (var grid in hangarDelay[i].gridData)
-                            MyVisualScriptLogicProvider.SendChatMessageColored($"Storing Grid {grid.gridName} in 10 seconds", Color.Green, "[FactionHangar]", hangarDelay[i].playerId, "Green");
-                }
-                else
-                {
-                    if (config.privateHangarConfig.privateStoreDelay - hangarDelay[i].timer == 10)
-                        foreach (var grid in hangarDelay[i].gridData)
-                            MyVisualScriptLogicProvider.SendChatMessageColored($"Storing Grid {grid.gridName} in 10 seconds", Color.Green, "[FactionHangar]", hangarDelay[i].playerId, "Green");
-                }
+                delay.timer++;
+                if (storeDelay - delay.timer == 10)
+                    foreach (var grid in delay.gridData)
+                        MyVisualScriptLogicProvider.SendChatMessageColored($"Storing Grid {grid.gridName} in 10 seconds", Color.Green, "[FactionHangar]", delay.requesterId, "Green");
             }
+        }
+
+        private bool IsEnemyNearDelayedGrids(HangarDelayData delay)
+        {
+            foreach (var data in delay.gridData)
+            {
+                IMyEntity entity;
+                if (!MyAPIGateway.Entities.TryGetEntityById(data.gridId, out entity)) continue;
+                if (IsEnemyNearStoring(entity as IMyCubeGrid, delay.hangarType, delay.requesterId)) return true;
+            }
+
+            return false;
         }
 
         public void ChatHandler(string messageText, ref bool sendToOthers)

@@ -64,10 +64,12 @@ namespace CustomHangar
             return gridNames.ToString();
         }
 
+        /// <summary>Faction hangar spawns: a grid whose owner has since left the faction goes to the player spawning it.</summary>
         public static void CheckOwnerValidFaction(IMyFaction faction, MyCubeGrid grid, long playerId)
         {
-            if (faction == null) return;
-            if (faction.IsMember(playerId)) return;
+            if (faction == null || grid == null) return;
+            long owner = grid.BigOwners.Count > 0 ? grid.BigOwners[0] : 0;
+            if (owner != 0 && faction.IsMember(owner)) return;
 
             grid.ChangeGridOwner(playerId, MyOwnershipShareModeEnum.Faction);
         }
@@ -909,6 +911,10 @@ namespace CustomHangar
 
                         var tank = baseBlock as MyObjectBuilder_GasTank;
                         if (tank == null) continue;
+
+                        // SetH2Percentage: hydrogen tanks only, oxygen tanks keep their stored level
+                        var tankDef = MyDefinitionManager.Static.GetCubeBlockDefinition(block.GetId()) as MyGasTankDefinition;
+                        if (tankDef == null || tankDef.StoredGasId.SubtypeName != "Hydrogen") continue;
 
                         float h2Pct = Session.Instance.config.spawnConfig.h2Percentage;
                         if (h2Pct >= 0)
