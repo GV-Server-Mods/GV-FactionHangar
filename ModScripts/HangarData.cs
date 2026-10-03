@@ -396,6 +396,7 @@ namespace CustomHangar
                 }
                 catch (Exception ex)
                 {
+                    VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Could not read hangar data, starting empty!\n {ex}");
                     return new AllHangarData();
                 }
             }

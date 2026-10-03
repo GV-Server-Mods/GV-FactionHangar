@@ -52,6 +52,7 @@ namespace CustomHangar
                 }
                 catch (Exception ex)
                 {
+                    VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Could not read config, writing defaults!\n {ex}");
                     return CreateNewFile();
                 }
             }

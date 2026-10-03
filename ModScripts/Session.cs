@@ -1442,7 +1442,6 @@ namespace CustomHangar
 
                 var split = messageText.Split(' ');
 
-                bool originalLocation = false;
                 string gridIndex = "";
                 int index = -1;
 
@@ -1674,7 +1673,6 @@ namespace CustomHangar
 
                 var split = messageText.Split(' ');
 
-                bool originalLocation = false;
                 string gridIndex = "";
                 int index = -1;
 
