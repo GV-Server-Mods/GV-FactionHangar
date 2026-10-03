@@ -1,0 +1,6 @@
+{
+    // SE metadata.mod is XML; the XML extension otherwise treats .mod as a DTD module
+    "files.associations": {
+        "*.mod": "xml"
+    }
+}
