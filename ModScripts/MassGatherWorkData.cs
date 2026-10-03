@@ -15,7 +15,6 @@ namespace CustomHangar
     public class MassGathererWorkData : WorkData
     {
         public List<MyCubeGrid> grids = new List<MyCubeGrid>();
-        public double massSum = 0;
         public long factionWalletData = -1;
         public IMyFaction faction = null;
         public long playerWalletData = -1;
@@ -34,7 +33,7 @@ namespace CustomHangar
                 blocks.Clear();
                 blocks.EnsureCapacity(cubeGrid.BlocksCount);
                 ((IMyCubeGrid)cubeGrid).GetBlocks(blocks);
-                GatherMass(blocks, workData);
+                DisableAutopilots(blocks);
             }
 
             GatherWalletData:
@@ -50,7 +49,8 @@ namespace CustomHangar
             goto GatherWalletData;
         }
 
-        private void GatherMass(List<IMySlimBlock> blocks, MassGathererWorkData workData)
+        // Preview mass now comes from the server (SpawnRules.GetBlueprintMass); this only stops preview autopilots.
+        private void DisableAutopilots(List<IMySlimBlock> blocks)
         {
             foreach (var block in blocks)
             {
@@ -70,30 +70,12 @@ namespace CustomHangar
                         emotionBlock.Enabled = false;
                 }
 
-                workData.massSum += block.Mass;
-                if (block.FatBlock?.GetInventory() != null)
-                {
-                    var fatBlock = block.FatBlock;
-                    for (int i = 0; i < fatBlock.InventoryCount; i++)
-                    {
-                        var inv = (MyInventory)fatBlock.GetInventory(i);
-                        if (inv.ExternalMass != 0)
-                        {
-                            workData.massSum += (double)(inv.CurrentMass - inv.ExternalMass);
-                        }
-                        else
-                        {
-                            workData.massSum += (double)inv.CurrentMass;
-                        }
-                    }
-                }
             }
         }
 
         public void ScanGridMassCallback(WorkData data)
         {
             var workData = (MassGathererWorkData)data;
-            Session.Instance.previewMass = (float)workData.massSum;
 
             foreach(var grid in workData.grids)
             {
