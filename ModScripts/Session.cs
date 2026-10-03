@@ -860,7 +860,8 @@ namespace CustomHangar
                 return;
             }
 
-            Vector3D original = obs[0].PositionAndOrientation.Value.Position;
+            // Stored grid centre, taken before the blueprint is moved to the placement
+            Vector3D original = SpawnRules.GetGridWorldCenter(obs[0]);
             double mass = SpawnRules.GetBlueprintMass(obs);
             if (!SpawnRules.ApplyPlacement(obs, request.placement))
             {
@@ -2025,7 +2026,8 @@ namespace CustomHangar
 
             RotationSpeed = 0.01f;
             previewDistance = 50;
-            original = cubeGridObs[0].PositionAndOrientation.Value.Position;
+            // Nearby zone is centred on the stored grid's centre, the same point placements are measured from
+            original = SpawnRules.GetGridWorldCenter(cubeGridObs[0]);
             hudNotify = MyAPIGateway.Utilities.CreateNotification($"[Valid Spawn] = {allowSpawn} | Cost To Spawn = {spawnCost} SC", int.MaxValue, "White");
             hudNotify.Show();
             hudNotify.ResetAliveTime();
