@@ -1140,16 +1140,50 @@ namespace CustomHangar
         public void ChatHandler(string messageText, ref bool sendToOthers)
         {
             if (isDedicated) return;
-            IMyPlayer client = MyAPIGateway.Session.LocalHumanPlayer;
-            IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(client.IdentityId);
-            bool isLeader = false;
+            string[] words = messageText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            string prefix = words.Length > 0 ? GetHangarPrefix(words[0]) : null;
+            if (prefix == null) return;
 
+            // Hangar commands never reach public chat
+            sendToOthers = false;
+            IMyPlayer client = MyAPIGateway.Session.LocalHumanPlayer;
             if (inGridPlacementView)
             {
                 Comms.SendChatMessage($"Command NOT allowed while in placement mode.", "Red", client.IdentityId, Color.Red);
                 return;
             }
 
+            string typed = messageText;
+            words[0] = prefix;
+            for (int i = 1; i < words.Length; i++)
+                words[i] = words[i].ToLowerInvariant();
+            messageText = string.Join(" ", words);
+
+            if (words.Length == 1 || words[1] == "help")
+            {
+                Utils.LoadHelpPopup();
+                return;
+            }
+
+            if (Array.IndexOf(prefix == "/fh" ? FactionSubcommands : PrivateSubcommands, words[1]) < 0)
+            {
+                Comms.SendChatMessage($"Unknown command '{typed}'. Type {prefix} help for the command list.", "Red", client.IdentityId, Color.Red);
+                Utils.LoadHelpPopup();
+                return;
+            }
+
+            // An index command without an index shows the list to pick from
+            if (words.Length == 2 && (words[1] == "load" || words[1] == "transfer" || words[1] == "remove"))
+            {
+                if (prefix == "/fh")
+                    Comms.ClientRequestFactionList(client.IdentityId, client.DisplayName);
+                else
+                    Comms.ClientRequestPrivateList(client.IdentityId, client.DisplayName);
+                return;
+            }
+
+            IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(client.IdentityId);
+            bool isLeader = false;
             if (faction != null)
                 isLeader = faction.IsLeader(client.IdentityId);
 
@@ -1207,7 +1241,7 @@ namespace CustomHangar
                         gridName += $" {split[i]}";
                     }*/
 
-                    int.TryParse(split[2], out gridIndex);
+                    if (!int.TryParse(split[2], out gridIndex)) gridIndex = -1;
 
                     //GetEntitiesInSphere(entities, playerCache.GetPosition(), 500);
                     if (gridIndex < 0 || gridIndex >= gridListToStore.Count)
@@ -1419,8 +1453,7 @@ namespace CustomHangar
                 }
 
                 gridIndex = split[2];
-                int.TryParse(gridIndex, out index);
-                if (index < 0)
+                if (!int.TryParse(gridIndex, out index) || index < 0)
                 {
                     Comms.SendChatMessage("Invalid index.", "Red", client.IdentityId, Color.Red);
                     //MyVisualScriptLogicProvider.SendChatMessageColored($"Invalid index.", Color.Red, "[FactionHangar]", client.IdentityId, "Red");
@@ -1454,8 +1487,7 @@ namespace CustomHangar
                 }
 
                 gridIndex = split[2];
-                int.TryParse(gridIndex, out index);
-                if (index < 0)
+                if (!int.TryParse(gridIndex, out index) || index < 0)
                 {
                     Comms.SendChatMessage("Invalid index.", "Red", client.IdentityId, Color.Red);
                     //MyVisualScriptLogicProvider.SendChatMessageColored($"Invalid index.", Color.Red, "[FactionHangar]", client.IdentityId, "Red");
@@ -1490,7 +1522,7 @@ namespace CustomHangar
 
                 if (split.Length == 3)
                 {
-                    int.TryParse(split[2], out gridIndex);
+                    if (!int.TryParse(split[2], out gridIndex)) gridIndex = -1;
 
                     if (gridIndex < 0 || gridIndex >= gridListToStore.Count)
                     {
@@ -1653,8 +1685,7 @@ namespace CustomHangar
                 }
 
                 gridIndex = split[2];
-                int.TryParse(gridIndex, out index);
-                if (index < 0)
+                if (!int.TryParse(gridIndex, out index) || index < 0)
                 {
                     Comms.SendChatMessage("Invalid index.", "Red", client.IdentityId, Color.Red);
                     //MyVisualScriptLogicProvider.SendChatMessageColored($"Invalid index.", Color.Red, "[FactionHangar]", client.IdentityId, "Red");
@@ -1690,8 +1721,7 @@ namespace CustomHangar
                 }
 
                 gridIndex = split[2];
-                int.TryParse(gridIndex, out index);
-                if (index < 0)
+                if (!int.TryParse(gridIndex, out index) || index < 0)
                 {
                     Comms.SendChatMessage("Invalid index.", "Red", client.IdentityId, Color.Red);
                     //MyVisualScriptLogicProvider.SendChatMessageColored($"Invalid index.", Color.Red, "[FactionHangar]", client.IdentityId, "Red");
@@ -1718,12 +1748,18 @@ namespace CustomHangar
                 //MyVisualScriptLogicProvider.SendChatMessageColored($"Client spawn gps locations are now set to '{spawnClientGPS}'", Color.Green, "[FactionHangar]", client.IdentityId, "Green");
 
             }
+        }
 
-            if (messageText.StartsWith("/fh help"))
-            {
-                sendToOthers = false;
-                Utils.LoadHelpPopup();
-            }
+        static readonly string[] FactionSubcommands = { "list", "store", "load", "transfer", "remove", "togglesphere", "togglegps" };
+        static readonly string[] PrivateSubcommands = { "list", "store", "load", "transfer", "remove" };
+
+        /// <summary>"/fh" or "/ph" for a hangar command word (long forms included), otherwise null.</summary>
+        static string GetHangarPrefix(string word)
+        {
+            word = word.ToLowerInvariant();
+            if (word == "/fh" || word == "/factionhangar") return "/fh";
+            if (word == "/ph" || word == "/privatehangar") return "/ph";
+            return null;
         }
 
         private void ConnectedGridsResult(ResultEnum result)

@@ -191,6 +191,8 @@ namespace CustomHangar
         {
             StringBuilder sb = new StringBuilder();
             sb.Append("*** Faction leaders can execute commands on any faction grid while members can only execute commands on their own grids in the faction hangar. ***\n\n");
+            sb.Append("/fh help or /ph help - Shows this list. /factionhangar and /privatehangar also work.\n");
+            sb.Append("load, transfer or remove without an index shows the hangar list.\n\n");
             sb.Append("/fh list - Displays a list of grids and their index currently in your faction hangar.\n");
             sb.Append("/fh store - Displays a list of possible grids you can store to your faction hangar in range.\n");
             sb.Append("/fh store [index#] - Attempts to store the desired grid to your faction hangar.\n");
