@@ -25,6 +25,8 @@ namespace CustomHangar
         [ProtoMember(8)][XmlElement("OriginalSpawningConfig")] public SpawnOriginalConfig spawnOriginalConfig;
         [ProtoMember(9)][XmlElement("EnemyCheckSettings")] public EnemyCheckConfig enemyCheckConfig;
         [ProtoMember(10)][XmlElement("SpawnAreas")] public SpawnAreas[] spawnAreas;
+        // GVK: unhangar is free and skips the enemy check inside a safezone owned by (or whitelisting) the player's faction
+        [ProtoMember(12)][XmlElement("FreeSpawnInOwnFactionSafeZone")] public bool freeSpawnInOwnFactionSafeZone;
 
         public static Config LoadConfig()
         {

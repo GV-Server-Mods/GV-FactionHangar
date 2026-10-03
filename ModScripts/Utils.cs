@@ -92,6 +92,48 @@ namespace CustomHangar
             grid.ChangeGridOwner(playerId, MyOwnershipShareModeEnum.Faction);
         }
 
+        /// <summary>
+        /// GVK: true if the point is inside an enabled safezone whose block is owned by the player's faction,
+        /// or whose faction whitelist includes it. Always false when the config toggle is off.
+        /// </summary>
+        public static bool IsInOwnFactionSafeZone(Vector3D point, long playerId)
+        {
+            if (Session.Instance.config == null || !Session.Instance.config.freeSpawnInOwnFactionSafeZone) return false;
+            IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerId);
+            if (faction == null) return false;
+
+            foreach (MySafeZone zone in MySessionComponentSafeZones.SafeZones)
+            {
+                if (zone == null || zone.MarkedForClose || !zone.Enabled) continue;
+                if (!IsInsideSafeZone(zone, point)) continue;
+
+                MyEntity blockEnt;
+                if (zone.SafeZoneBlockId != 0 && MyEntities.TryGetEntityById(zone.SafeZoneBlockId, out blockEnt))
+                {
+                    var block = blockEnt as VRage.Game.ModAPI.IMyCubeBlock;
+                    IMyFaction ownerFaction = block != null && block.OwnerId != 0 ? MyAPIGateway.Session.Factions.TryGetPlayerFaction(block.OwnerId) : null;
+                    if (ownerFaction != null && ownerFaction.FactionId == faction.FactionId) return true;
+                }
+
+                if (zone.AccessTypeFactions == MySafeZoneAccess.Whitelist)
+                {
+                    var zoneOb = zone.GetObjectBuilder() as MyObjectBuilder_SafeZone;
+                    if (zoneOb != null && zoneOb.Factions != null && Array.IndexOf(zoneOb.Factions, faction.FactionId) >= 0) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsInsideSafeZone(MySafeZone zone, Vector3D point)
+        {
+            if (zone.Shape == MySafeZoneShape.Sphere)
+                return Vector3D.DistanceSquared(zone.PositionComp.GetPosition(), point) <= (double)zone.Radius * zone.Radius;
+
+            var obb = new MyOrientedBoundingBoxD(zone.PositionComp.LocalAABB, zone.WorldMatrix);
+            return obb.Contains(ref point);
+        }
+
         public static bool IsGridIntersecting(List<MyCubeGrid> grids)
         {
             if (grids == null || grids.Count == 0) return false;
@@ -399,7 +441,8 @@ namespace CustomHangar
 
 
                 Session.Instance.spawnType = SpawnType.Original;
-                if (Session.Instance.IsEnemyNear(cubeGridObs[0], packet.playerId))
+                Vector3D originalPos = cubeGridObs[0].PositionAndOrientation.Value.Position;
+                if (!IsInOwnFactionSafeZone(originalPos, packet.playerId) && Session.Instance.IsEnemyNear(cubeGridObs[0], packet.playerId))
                 {
                     MyVisualScriptLogicProvider.SendChatMessageColored($"Enemy nearby, failed to spawn from hangar.", Color.Red, "[FactionHangar]", packet.playerId, "Red");
                     return;

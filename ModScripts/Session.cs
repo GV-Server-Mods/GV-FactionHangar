@@ -520,8 +520,9 @@ namespace CustomHangar
 
             if (previewGrids == null || previewGrids.Count == 0) return;
             spawnError = SpawnError.None;
-            
-            
+
+            // GVK: inside own faction's safezone the spawn is free and ignores nearby enemies (server re-checks)
+            bool freeZone = Utils.IsInOwnFactionSafeZone(endCoordCache, playerCache.IdentityId);
 
             double distance = Vector3D.Distance(endCoordCache, original);
 
@@ -530,11 +531,11 @@ namespace CustomHangar
                 if (distance <= config.spawnNearbyConfig.nearbyRadius)
                 {
                     spawnType = SpawnType.Nearby;
-                    bool result = IsEnemyNear();
+                    bool result = !freeZone && IsEnemyNear();
                     if (result)
                         spawnError = SpawnError.EnemyNearby;
 
-                    spawnCost = config.spawnNearbyConfig.nearbySpawnCost;
+                    spawnCost = freeZone ? 0 : config.spawnNearbyConfig.nearbySpawnCost;
                     bool canAfford;
                     if (hangarType == HangarType.Faction)
                         canAfford = spawnCost <= factionWallet ? true : spawnCost <= playerWallet;
@@ -561,8 +562,8 @@ namespace CustomHangar
                 {
                     if (Vector3D.Distance(endCoordCache, area.areaCenter) <= area.areaRadius) continue;
                     spawnType = SpawnType.SpawnArea;
-                    spawnCost = area.spawnAreaCost;
-                    bool result = IsEnemyNear(area);
+                    spawnCost = freeZone ? 0 : area.spawnAreaCost;
+                    bool result = !freeZone && IsEnemyNear(area);
                     if (result)
                         spawnError = SpawnError.EnemyNearby;
 
@@ -587,8 +588,8 @@ namespace CustomHangar
                 {
                     if (Vector3D.Distance(endCoordCache, area.areaCenter) > area.areaRadius) continue;
                     spawnType = SpawnType.SpawnArea;
-                    spawnCost = area.spawnAreaCost;
-                    bool result2 = IsEnemyNear(area);
+                    spawnCost = freeZone ? 0 : area.spawnAreaCost;
+                    bool result2 = !freeZone && IsEnemyNear(area);
                     if (result2)
                         spawnError = SpawnError.EnemyNearby;
 
@@ -613,11 +614,11 @@ namespace CustomHangar
 
             if (config.dynamicSpawningConfig.enableDynamicSpawning)
             {
-                spawnCost = CalculateCost();
+                spawnCost = freeZone ? 0 : CalculateCost();
                 if (!useInverseSpawnArea)
                 {
                     spawnType = SpawnType.Dynamic;
-                    bool result = IsEnemyNear();
+                    bool result = !freeZone && IsEnemyNear();
                     if (result)
                         spawnError = SpawnError.EnemyNearby;
 
@@ -1179,6 +1180,11 @@ namespace CustomHangar
         {
             IMyPlayer player = GetPlayerfromID(playerId);
             IMyFaction faction = MyAPIGateway.Session.Factions.TryGetPlayerFaction(playerId);
+
+            // GVK: the server checks the own-faction safezone itself rather than trusting the client's cost
+            if (obs.Count > 0 && obs[0].PositionAndOrientation.HasValue && Utils.IsInOwnFactionSafeZone(obs[0].PositionAndOrientation.Value.Position, playerId))
+                cost = 0;
+
             MyAPIGateway.Entities.RemapObjectBuilderCollection(obs);
             IMyCubeGrid mainGrid = null;
             List<MyCubeGrid> gridsToSpawn = new List<MyCubeGrid>();
