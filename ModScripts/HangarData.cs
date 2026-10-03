@@ -385,23 +385,53 @@ namespace CustomHangar
         {
             if (MyAPIGateway.Utilities.FileExistsInWorldStorage("FactionHangarStorage.xml", typeof(AllHangarData)) == true)
             {
+                string content = null;
                 try
                 {
-                    AllHangarData data = new AllHangarData();
                     var reader = MyAPIGateway.Utilities.ReadFileInWorldStorage("FactionHangarStorage.xml", typeof(AllHangarData));
-                    string content = reader.ReadToEnd();
-
+                    content = reader.ReadToEnd();
                     reader.Close();
-                    return data = MyAPIGateway.Utilities.SerializeFromXML<AllHangarData>(content);
+
+                    AllHangarData data = MyAPIGateway.Utilities.SerializeFromXML<AllHangarData>(content);
+                    if (data != null)
+                    {
+                        if (data.factionData == null) data.factionData = new List<FactionData>();
+                        if (data.privateData == null) data.privateData = new List<PrivateData>();
+                        return data;
+                    }
                 }
                 catch (Exception ex)
                 {
-                    VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Could not read hangar data, starting empty!\n {ex}");
-                    return new AllHangarData();
+                    VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Could not read hangar data!\n {ex}");
                 }
+
+                // The next save overwrites the file, so keep a copy of what couldn't be read
+                BackupUnreadableData(content);
+                return new AllHangarData();
             }
 
             return new AllHangarData();
+        }
+
+        static void BackupUnreadableData(string content)
+        {
+            const string backupName = "FactionHangarStorage.unreadable.xml";
+            if (string.IsNullOrEmpty(content))
+            {
+                VRage.Utils.MyLog.Default.WriteLineAndConsole("FactionHangar: Starting with empty hangars; the hangar data file could not be read at all.");
+                return;
+            }
+
+            try
+            {
+                using (var writer = MyAPIGateway.Utilities.WriteFileInWorldStorage(backupName, typeof(AllHangarData)))
+                    writer.Write(content);
+                VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Starting with empty hangars. The unreadable file is kept as {backupName} in the world's Storage folder.");
+            }
+            catch (Exception ex)
+            {
+                VRage.Utils.MyLog.Default.WriteLineAndConsole($"FactionHangar: Could not back up hangar data!\n {ex}");
+            }
         }
     }
 

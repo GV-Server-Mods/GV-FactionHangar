@@ -917,7 +917,7 @@ namespace CustomHangar
             {
                 bool found = false;
                 HangarDelayData data = Session.Instance.hangarDelay[i];
-                for (int j = data.gridData.Count - 1; 1 >= 0; j--)
+                for (int j = data.gridData.Count - 1; j >= 0; j--)
                 {
                     GridData gData = data.gridData[j];
                     if (gData.gridId != block.CubeGrid.EntityId) continue;

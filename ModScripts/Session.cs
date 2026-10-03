@@ -934,7 +934,15 @@ namespace CustomHangar
                 IMyEntity ent = MyAPIGateway.Entities.CreateFromObjectBuilder(cloneOb);
                 var cubeGrid = ent as MyCubeGrid;
                 var grid = ent as IMyCubeGrid;
-                if (cubeGrid == null || grid == null) return;
+                if (cubeGrid == null || grid == null)
+                {
+                    // Created grids that never get added must be closed, or they leak
+                    ent?.Close();
+                    foreach (var created in gridsToSpawn)
+                        created.Close();
+                    MyVisualScriptLogicProvider.SendChatMessageColored($"Failed to spawn grid from hangar.", Color.Red, "[FactionHangar]", playerId, "Red");
+                    return;
+                }
 
                 cubeGrid.Save = true;
                 cubeGrid.SyncFlag = true;
@@ -964,6 +972,8 @@ namespace CustomHangar
             {
                 if (Utils.IsGridIntersecting(gridsToSpawn))
                 {
+                    foreach (var created in gridsToSpawn)
+                        created.Close();
                     MyVisualScriptLogicProvider.SendChatMessageColored($"Failed to spawn grid from hangar, something is blocking placement.", Color.Red, "[FactionHangar]", playerId, "Red");
                     return;
                 }
@@ -1939,7 +1949,10 @@ namespace CustomHangar
                 }
             }
 
-            
+            var failedGrid = grid as MyCubeGrid;
+            if (failedGrid != null)
+                failedGrid.OnGridBlockDamaged -= Utils.GridDamageMonitor;
+
             if (autoHangar)
                 MyLog.Default.WriteLineAndConsole($"[FactionHangar] - AutoHangar failed to store grid {grid.CustomName}");
             else
@@ -1985,8 +1998,17 @@ namespace CustomHangar
             MyObjectBuilder_Definitions myObjectBuilder_Definitions = MyObjectBuilderSerializer.CreateNewObject<MyObjectBuilder_Definitions>();
             myObjectBuilder_Definitions.ShipBlueprints = new MyObjectBuilder_ShipBlueprintDefinition[1];
             myObjectBuilder_Definitions.ShipBlueprints[0] = myObjectBuilder_ShipBlueprintDefinition;
-            MyObjectBuilderSerializer.SerializeXML(path, false, myObjectBuilder_Definitions);
-            return true;
+
+            // The grid is deleted after this, so only report success if the file was really written
+            try
+            {
+                return MyObjectBuilderSerializer.SerializeXML(path, false, myObjectBuilder_Definitions);
+            }
+            catch (Exception ex)
+            {
+                MyLog.Default.WriteLineAndConsole($"[FactionHangar] - Could not write stored grid {path}: {ex.Message}");
+                return false;
+            }
         }
 
         public  List<MyObjectBuilder_CubeGrid> GetGridGroupObs(MyCubeGrid cubeGrid, GridLinkTypeEnum groupType)
@@ -2209,12 +2231,9 @@ namespace CustomHangar
         {
             //Instance = null;
             //MyAPIGateway.Multiplayer.UnregisterMessageHandler(NetworkHandle, MessageHandler);
-            if (config.enemyCheckConfig.enableBlockCheck)
-            {
-                MyAPIGateway.Entities.OnEntityAdd -= OnBlockAdded;
-                MyAPIGateway.Entities.OnEntityRemove -= OnBlockRemoved;
-            }
-            
+            // Unhook unconditionally: config can still be null on a client that never received it
+            MyEntities.OnEntityCreate -= OnBlockAdded;
+            MyEntities.OnEntityRemove -= OnBlockRemoved;
 
             MyAPIGateway.Utilities.MessageEntered -= ChatHandler;
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(NetworkHandle, Comms.MessageHandler);
