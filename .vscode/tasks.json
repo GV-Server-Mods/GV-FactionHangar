@@ -1,7 +1,7 @@
 {
 	// GV_FactionHangar — build tasks
 	// NOTE: Mal.Mdk2.ModPackager runs "mdk pack" automatically after every build,
-	// which deploys the mod to %APPDATA%\SpaceEngineers\Mods\GV_FactionHangar
+	// which deploys the mod to %APPDATA%\SpaceEngineers\Mods\FactionHangar
 	// (including dependency DLLs and the mdk.meta marker file it uses to
 	// identify the folder). DO NOT manually copy/robocopy into that folder —
 	// removing mdk.meta makes "mdk pack" fail with exit code -1.
@@ -14,7 +14,7 @@
 			"command": "dotnet",
 			"args": [
 				"build",
-				"GV_FactionHangar.csproj",
+				"FactionHangar.csproj",
 				"-c",
 				"Release",
 				"--nologo"
@@ -34,7 +34,7 @@
 			"command": "dotnet",
 			"args": [
 				"build",
-				"GV_FactionHangar.csproj",
+				"FactionHangar.csproj",
 				"-c",
 				"Debug",
 				"--nologo"

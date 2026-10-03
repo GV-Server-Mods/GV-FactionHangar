@@ -7,7 +7,7 @@ Fork of the **Faction Hangar** Space Engineers mod for the GV: Deserts of Kharak
 
 ## Build
 
-MDK2 mod project. Code lives in `ModScripts/`. Build `GV_FactionHangar.csproj` to deploy to the local Mods folder.
+MDK2 mod project. Code lives in `ModScripts/`. Build `FactionHangar.csproj` to deploy to the local Mods folder.
 
 ## Issues
 
